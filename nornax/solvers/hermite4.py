@@ -32,6 +32,17 @@ class Hermite4AdaptiveResult(NamedTuple):
     dt_history: jnp.ndarray
 
 
+class Hermite4ControlledStep(NamedTuple):
+    """Bundle describing one adaptive Hermite-4 proposal."""
+
+    accepted_state: NBodyState
+    trial_state: NBodyState
+    refined_state: NBodyState
+    dt: jnp.ndarray
+    error_estimate: jnp.ndarray
+    accepted: jnp.ndarray
+
+
 def hermite4_step(
     state: NBodyState,
     dt: jnp.ndarray,
@@ -113,6 +124,113 @@ def hermite4_adaptive_scan(
 
     final_state, dt_history = jax.lax.scan(body_fn, state, xs=None, length=n_steps)
     return Hermite4AdaptiveResult(final_state=final_state, dt_history=dt_history)
+
+
+def hermite4_step_doubling_error(
+    state: NBodyState,
+    dt: jnp.ndarray,
+    force_model: ForceModel,
+    *,
+    args: object = None,
+) -> Hermite4ControlledStep:
+    """Estimate local error by comparing one full step to two half steps."""
+    dt = jnp.asarray(dt, dtype=state.positions.dtype)
+    trial_state = hermite4_step(state, dt, force_model, args=args)
+
+    half_dt = 0.5 * dt
+    mid_state = hermite4_step(state, half_dt, force_model, args=args)
+    refined_state = hermite4_step(mid_state, half_dt, force_model, args=args)
+
+    pos_err = jnp.max(
+        jnp.linalg.norm(refined_state.positions - trial_state.positions, axis=-1)
+    )
+    vel_err = jnp.max(
+        jnp.linalg.norm(refined_state.velocities - trial_state.velocities, axis=-1)
+    )
+    error_estimate = jnp.maximum(pos_err, vel_err)
+
+    return Hermite4ControlledStep(
+        accepted_state=refined_state,
+        trial_state=trial_state,
+        refined_state=refined_state,
+        dt=dt,
+        error_estimate=error_estimate,
+        accepted=jnp.asarray(True),
+    )
+
+
+def hermite4_controlled_step(
+    state: NBodyState,
+    dt: jnp.ndarray,
+    force_model: ForceModel,
+    *,
+    atol: float,
+    args: object = None,
+) -> Hermite4ControlledStep:
+    """Perform one Hermite-4 proposal and flag acceptance against ``atol``."""
+    proposal = hermite4_step_doubling_error(state, dt, force_model, args=args)
+    accepted = proposal.error_estimate <= jnp.asarray(atol, dtype=proposal.dt.dtype)
+    accepted_state = jax.tree.map(
+        lambda refined, original: jnp.where(accepted, refined, original),
+        proposal.refined_state,
+        state,
+    )
+    return Hermite4ControlledStep(
+        accepted_state=accepted_state,
+        trial_state=proposal.trial_state,
+        refined_state=proposal.refined_state,
+        dt=proposal.dt,
+        error_estimate=proposal.error_estimate,
+        accepted=accepted,
+    )
+
+
+def hermite4_adaptive_solve(
+    state: NBodyState,
+    force_model: ForceModel,
+    controller: AarsethController,
+    *,
+    t_final: float,
+    atol: float = 1.0e-5,
+    max_attempts: int = 8,
+    args: object = None,
+) -> Hermite4AdaptiveResult:
+    """Advance Hermite-4 with adaptive acceptance until ``t_final``."""
+    t_final = jnp.asarray(t_final, dtype=state.time.dtype)
+    current_state = state
+    dt_history_list: list[jnp.ndarray] = []
+
+    while float(current_state.time) < float(t_final):
+        suggested_dt = controller.suggest_dt(current_state)
+        remaining = jnp.maximum(t_final - current_state.time, 0.0)
+        dt_try = jnp.minimum(suggested_dt, remaining)
+
+        accepted = False
+        accepted_state = current_state
+        for _ in range(max_attempts):
+            proposal = hermite4_controlled_step(
+                current_state,
+                dt_try,
+                force_model,
+                atol=atol,
+                args=args,
+            )
+            if bool(proposal.accepted):
+                accepted = True
+                accepted_state = proposal.accepted_state
+                break
+            dt_try = 0.5 * dt_try
+
+        if not accepted:
+            accepted_state = hermite4_step(
+                current_state, dt_try, force_model, args=args
+            )
+
+        dt_history_list.append(accepted_state.time - current_state.time)
+        current_state = accepted_state
+
+    dt_history = jnp.asarray(dt_history_list, dtype=state.positions.dtype)
+    return Hermite4AdaptiveResult(final_state=current_state, dt_history=dt_history)
 
 
 if dfx is not None:  # pragma: no cover - depends on external diffrax stack
