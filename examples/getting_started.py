@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import jax
-
 from jaccpot import FastMultipoleMethod
+
 from nornax import HermiteConfig, HermiteIntegrator
 
 

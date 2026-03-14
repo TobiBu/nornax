@@ -1,23 +1,27 @@
 # nornax
 
-`nornax` is a JAX-first Hermite integrator package for gravitational N-body
-simulations. It is designed as a sibling project to:
+`nornax` is a fresh restart of a JAX-native Hermite integrator package for
+gravitational N-body dynamics.
 
-- [`yggdrax`](https://github.com/TobiBu/yggdrax): tree construction and traversal
-- [`jaccpot`](https://github.com/TobiBu/jaccpot): fast multipole force + jerk backend
+The current direction is:
 
-Nornax focuses on high-quality **time integration** and delegates force
-computation to `jaccpot`, so you can combine Hermite schemes with FMM-level
-scalability.
+- standalone and general-purpose first
+- Diffrax-facing solver design
+- GPU-efficient JAX kernels
+- clean backend adapters so `jaccpot` can plug in later
 
-## Features
+## Current Week-1 Scope
 
-- High-level `HermiteIntegrator` API
-- Hermite-4 predictor/corrector stepping
-- Hermite-6-compatible stepping interface (currently composed half-step mode)
-- Constant and Aarseth-style adaptive timestep modes
-- JAX array-native state containers (`ParticleState`)
-- Direct use of `jaccpot` acceleration+jerk APIs
+This repository now contains the first implementation scaffold for that restart:
+
+- immutable `NBodyState` and `ForceDerivatives` PyTrees
+- backend-agnostic `ForceModel` protocol
+- standalone `DirectSumGravity` reference backend
+- pure Hermite-4 predictor/corrector step kernel
+- Diffrax-facing solver wrapper isolated behind an optional import
+
+Higher-order Hermite methods, adaptive/block timesteps, and a `jaccpot`
+backend adapter are planned but not implemented yet.
 
 ## Installation
 
@@ -25,17 +29,6 @@ Install from source:
 
 ```bash
 pip install -e .
-```
-
-If `jaccpot` and `yggdrax` are not available from your package index,
-install siblings first:
-
-```bash
-git clone https://github.com/TobiBu/yggdrax.git
-git clone https://github.com/TobiBu/jaccpot.git
-cd yggdrax && pip install -e . && cd ..
-cd jaccpot && pip install -e . && cd ..
-cd nornax && pip install -e .
 ```
 
 Install with development tooling:
@@ -50,36 +43,42 @@ pip install -e ".[dev]"
 import jax
 import jax.numpy as jnp
 
-from jaccpot import FastMultipoleMethod
-from nornax import HermiteConfig, HermiteIntegrator
+from nornax import initialize_state
+from nornax.forces import DirectSumGravity
+from nornax.solvers import hermite4_step
 
 jax.config.update("jax_enable_x64", True)
 
-solver = FastMultipoleMethod(preset="balanced", basis="solidfmm")
-integrator = HermiteIntegrator(
-    solver,
-    HermiteConfig(order=4, timestep_mode="constant", constant_dt=1.0e-3),
-)
+force_model = DirectSumGravity(G=1.0, softening=0.0)
+positions = jnp.asarray([[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+velocities = jnp.asarray([[0.0, 0.2, 0.0], [0.0, -0.2, 0.0]])
+masses = jnp.asarray([1.0, 1.0])
 
-key = jax.random.PRNGKey(0)
-positions = jax.random.uniform(key, (1024, 3), minval=-1.0, maxval=1.0)
-velocities = jnp.zeros_like(positions)
-masses = jnp.ones((1024,)) / 1024.0
-
-state = integrator.initialize_state(positions, velocities, masses)
-state = integrator.run(state, n_steps=10)
-print(state.time, state.positions.shape)
+state = initialize_state(positions, velocities, masses, force_model)
+state = hermite4_step(state, jnp.asarray(1.0e-2), force_model)
+print(state.time, state.positions)
 ```
 
-## Relationship to jaccpot FMM
+See [examples/two_body_diffrax.py](examples/two_body_diffrax.py) for a small
+runnable script.
 
-Nornax intentionally keeps force evaluation in `jaccpot`:
+## Planned Architecture
 
-- `nornax`: timestep control + Hermite update algebra
-- `jaccpot`: acceleration and jerk with FMM kernels
-- `yggdrax`: tree artifacts and traversal infrastructure
+- `nornax.state`: particle state and cached force derivatives
+- `nornax.forces`: standalone direct-sum backend plus future adapters
+- `nornax.solvers`: Hermite kernels and Diffrax-facing solver classes
+- `nornax.terms`: thin Diffrax integration hooks
 
-This separation keeps each sibling focused while enabling high performance.
+The scientific target is the family of higher-order Hermite methods discussed
+by Nitadori, Iwasawa, and Makino, with `snap` and `crackle` support added in
+later milestones.
+
+## Diffrax Note
+
+The code is now organized for Diffrax-based custom solvers, but the local
+environment used for this restart currently has an incompatible
+`diffrax`/`equinox`/`jaxtyping` stack. To avoid blocking core development, the
+Diffrax wrapper is isolated so the pure JAX kernels and tests remain usable.
 
 ## Development
 

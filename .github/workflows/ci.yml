@@ -28,8 +28,6 @@ jobs:
       - name: Install package + dev tools
         run: |
           python -m pip install --upgrade pip
-          pip install git+https://github.com/TobiBu/yggdrax.git
-          pip install git+https://github.com/TobiBu/jaccpot.git
           pip install -e ".[dev]"
 
       - name: Black
@@ -42,10 +40,10 @@ jobs:
         run: |
           pydoclint \
             nornax/__init__.py \
-            nornax/config.py \
-            nornax/integrator.py \
+            nornax/initialize.py \
             nornax/state.py \
-            nornax/timestep/criteria.py
+            nornax/forces/base.py \
+            nornax/forces/direct.py
 
       - name: Unit tests with coverage
         run: pytest
