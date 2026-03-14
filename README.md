@@ -1,5 +1,9 @@
 # nornax
 
+<p align="center">
+  <img src="./nornax.png" alt="nornax Logo" width="420" />
+</p>
+
 `nornax` is a fresh restart of a JAX-native Hermite integrator package for
 gravitational N-body dynamics.
 
@@ -75,10 +79,10 @@ later milestones.
 
 ## Diffrax Note
 
-The code is now organized for Diffrax-based custom solvers, but the local
-environment used for this restart currently has an incompatible
-`diffrax`/`equinox`/`jaxtyping` stack. To avoid blocking core development, the
-Diffrax wrapper is isolated so the pure JAX kernels and tests remain usable.
+The code is now organized for Diffrax-based custom solvers, and the project's
+global `nornax` development environment has a working `jax`/`diffrax` stack.
+The current Hermite-4 integration is still an early custom-solver path, but it
+now runs through a real `diffrax.diffeqsolve(...)` smoke test.
 
 ## Development
 
