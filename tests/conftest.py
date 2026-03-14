@@ -1,4 +1,4 @@
-"""Shared test fixtures for nornax."""
+"""Shared test fixtures for Nornax."""
 
 from __future__ import annotations
 
@@ -16,12 +16,8 @@ def two_body_initial_state() -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
         Positions, velocities, masses.
     """
-    positions = jnp.asarray(
-        [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=jnp.float64
-    )
-    velocities = jnp.asarray(
-        [[0.0, 0.2, 0.0], [0.0, -0.2, 0.0]], dtype=jnp.float64
-    )
+    positions = jnp.asarray([[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=jnp.float64)
+    velocities = jnp.asarray([[0.0, 0.2, 0.0], [0.0, -0.2, 0.0]], dtype=jnp.float64)
     masses = jnp.asarray([1.0, 1.0], dtype=jnp.float64)
     return positions, velocities, masses
 
