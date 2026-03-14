@@ -55,9 +55,10 @@ class DirectSumGravity:
 
         rv = jnp.sum(dr * dv, axis=-1)
         inv_r5 = inv_r3 * inv_r**2
-        pair_jerk = self.G * mass_j[..., None] * (
-            dv * inv_r3[..., None]
-            - 3.0 * rv[..., None] * dr * inv_r5[..., None]
+        pair_jerk = (
+            self.G
+            * mass_j[..., None]
+            * (dv * inv_r3[..., None] - 3.0 * rv[..., None] * dr * inv_r5[..., None])
         )
         jerk = jnp.sum(pair_jerk * inv_mask[..., None], axis=1)
         return ForceDerivatives(acc=acc, jerk=jerk)

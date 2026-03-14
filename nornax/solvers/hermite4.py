@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 
+from nornax.controllers.aarseth import AarsethController
 from nornax.forces.base import ForceModel
 from nornax.state import NBodyState
 from nornax.terms import NBodyTerm
@@ -20,6 +23,13 @@ else:  # pragma: no cover - depends on external diffrax stack
 
 
 Hermite4State = NBodyState
+
+
+class Hermite4AdaptiveResult(NamedTuple):
+    """Result bundle for a fixed-count adaptive Hermite-4 rollout."""
+
+    final_state: NBodyState
+    dt_history: jnp.ndarray
 
 
 def hermite4_step(
@@ -84,6 +94,25 @@ def require_jerk_from_derivs(derivs) -> jnp.ndarray:
     if derivs.jerk is None:
         raise ValueError("Hermite-4 requires jerk in the cached derivatives")
     return derivs.jerk
+
+
+def hermite4_adaptive_scan(
+    state: NBodyState,
+    force_model: ForceModel,
+    controller: AarsethController,
+    *,
+    n_steps: int,
+    args: object = None,
+) -> Hermite4AdaptiveResult:
+    """Advance Hermite-4 for a fixed number of adaptive global steps."""
+
+    def body_fn(carry: NBodyState, _):
+        dt = controller.suggest_dt(carry)
+        nxt = hermite4_step(carry, dt, force_model, args=args)
+        return nxt, dt
+
+    final_state, dt_history = jax.lax.scan(body_fn, state, xs=None, length=n_steps)
+    return Hermite4AdaptiveResult(final_state=final_state, dt_history=dt_history)
 
 
 if dfx is not None:  # pragma: no cover - depends on external diffrax stack
