@@ -1,60 +1,41 @@
-"""Particle state container for Nornax Hermite integrators."""
+"""State containers for Nornax N-body integration."""
 
 from __future__ import annotations
 
 from typing import NamedTuple
 
 import jax.numpy as jnp
-from jaxtyping import Array
 
 
-class ParticleState(NamedTuple):
-    """Immutable JAX-pytree for a complete N-body particle state.
+class ForceDerivatives(NamedTuple):
+    """Cached time derivatives of the acceleration field.
 
-    All arrays are expected to be JAX arrays so that the state can be passed
-    through ``jax.jit``-compiled functions without retracing.
-
-    Parameters
-    ----------
-    positions : Float[Array, "N 3"]
-        Particle positions.
-    velocities : Float[Array, "N 3"]
-        Particle velocities.
-    accelerations : Float[Array, "N 3"]
-        Gravitational accelerations at the current time.
-    jerks : Float[Array, "N 3"]
-        Time derivative of acceleration (jerk) at the current time.
-    masses : Float[Array, "N"]
-        Particle masses (constant throughout the integration).
-    time : float
-        Current simulation time.
+    The derivative ladder is designed to scale from Hermite-4 (acceleration and
+    jerk) up to higher-order Hermite methods that require snap and crackle.
+    Unavailable higher derivatives are stored as ``None``.
     """
 
-    positions: Array
-    velocities: Array
-    accelerations: Array
-    jerks: Array
-    masses: Array
-    time: float
+    acc: jnp.ndarray
+    jerk: jnp.ndarray | None = None
+    snap: jnp.ndarray | None = None
+    crackle: jnp.ndarray | None = None
+
+
+class NBodyState(NamedTuple):
+    """Immutable JAX PyTree for particle data and cached derivatives."""
+
+    positions: jnp.ndarray
+    velocities: jnp.ndarray
+    masses: jnp.ndarray
+    time: jnp.ndarray
+    derivs: ForceDerivatives
 
     @property
     def n_particles(self) -> int:
-        """Return the number of particles.
-
-        Returns
-        -------
-        int
-            Number of particles N.
-        """
+        """Return the number of particles."""
         return int(self.positions.shape[0])
 
-    def kinetic_energy(self) -> Array:
-        """Compute the total kinetic energy.
-
-        Returns
-        -------
-        Float[Array, ""]
-            Total kinetic energy :math:`E_k = \\frac{1}{2} \\sum_i m_i v_i^2`.
-        """
+    def kinetic_energy(self) -> jnp.ndarray:
+        """Compute the total kinetic energy."""
         v2 = jnp.sum(self.velocities**2, axis=-1)
         return 0.5 * jnp.sum(self.masses * v2)

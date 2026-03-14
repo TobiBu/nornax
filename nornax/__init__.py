@@ -1,14 +1,9 @@
-"""Nornax: Hermite integrators powered by jaccpot FMM."""
+"""Nornax: JAX-native Hermite integrators for N-body dynamics."""
 
 from ._typecheck import enable_runtime_typecheck
-from .config import HermiteConfig
-from .integrator import HermiteIntegrator
-from .state import ParticleState
+from .initialize import initialize_state
+from .state import ForceDerivatives, NBodyState
 
 enable_runtime_typecheck()
 
-__all__ = [
-    "HermiteConfig",
-    "HermiteIntegrator",
-    "ParticleState",
-]
+__all__ = ["ForceDerivatives", "NBodyState", "initialize_state"]
