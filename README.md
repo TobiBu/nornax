@@ -69,12 +69,14 @@ Examples:
 
 - [examples/two_body_diffrax.py](examples/two_body_diffrax.py): adaptive two-body solve
 - [examples/compare_hermite_orders.py](examples/compare_hermite_orders.py): compare Hermite-4/6/8 energy and angular-momentum drift
+- [examples/plummer_sphere_gpu.py](examples/plummer_sphere_gpu.py): small Plummer sphere run shaped for GPU/server use
 
 Notebooks:
 
 - [notebooks/hermite_orders_accuracy.ipynb](notebooks/hermite_orders_accuracy.ipynb): compare adaptive Hermite-4/6/8 drift and step counts
 - [notebooks/hermite_vs_diffrax_rk.ipynb](notebooks/hermite_vs_diffrax_rk.ipynb): compare Hermite against a standard Diffrax RK solver
 - [notebooks/direct_vs_jaccpot_backend.ipynb](notebooks/direct_vs_jaccpot_backend.ipynb): compare direct-sum and `jaccpot` backends for Hermite-4
+- [notebooks/plummer_sphere_gpu.ipynb](notebooks/plummer_sphere_gpu.ipynb): small Plummer sphere application notebook for GPU/server runs
 
 ## Jaccpot Adapter
 

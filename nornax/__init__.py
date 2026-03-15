@@ -8,6 +8,7 @@ from .diagnostics import (
     total_angular_momentum,
     total_energy,
 )
+from .initial_conditions import sample_plummer_sphere
 from .initialize import initialize_state
 from .solve import (
     solve_adaptive_hermite4,
@@ -29,6 +30,7 @@ __all__ = [
     "NBodyState",
     "gravitational_potential_energy",
     "initialize_state",
+    "sample_plummer_sphere",
     "solve_adaptive_to_time",
     "solve_adaptive_hermite4",
     "solve_adaptive_hermite4_to_time",
