@@ -1,4 +1,4 @@
-"""Public solve helpers for the current standalone Nornax API."""
+"""Public solve helpers for the current Diffrax-backed Nornax API."""
 
 from __future__ import annotations
 
@@ -15,6 +15,38 @@ from nornax.solvers.hermite4 import (
 )
 from nornax.solvers.hermite6 import Hermite6
 from nornax.terms import NBodyTerm, require_diffrax
+
+
+def solve_adaptive_to_time(
+    positions: jnp.ndarray,
+    velocities: jnp.ndarray,
+    masses: jnp.ndarray,
+    force_model: ForceModel,
+    *,
+    t_final: float,
+    order: int = 4,
+    controller: AarsethController | None = None,
+    atol: float = 1.0e-5,
+    policy: AdaptiveStepPolicy | None = None,
+    time: float = 0.0,
+    args: object = None,
+) -> AdaptiveSolveResult:
+    """Initialize and run an adaptive Diffrax solve for a Hermite scheme."""
+    solver_cls, max_order = _solver_config_for_order(order)
+    return _solve_adaptive_with_diffrax(
+        positions,
+        velocities,
+        masses,
+        force_model,
+        solver_cls=solver_cls,
+        max_order=max_order,
+        t_final=t_final,
+        controller=controller,
+        atol=atol,
+        policy=policy,
+        time=time,
+        args=args,
+    )
 
 
 def solve_adaptive_hermite4(
@@ -83,14 +115,13 @@ def solve_adaptive_hermite4_to_time(
     args: object = None,
 ) -> AdaptiveSolveResult:
     """Initialize and run an error-controlled adaptive Hermite-4 solve."""
-    return _solve_adaptive_with_diffrax(
+    return solve_adaptive_to_time(
         positions,
         velocities,
         masses,
         force_model,
-        solver_cls=Hermite4,
-        max_order=2,
         t_final=t_final,
+        order=4,
         controller=controller,
         atol=atol,
         policy=policy,
@@ -113,14 +144,13 @@ def solve_adaptive_hermite6_to_time(
     args: object = None,
 ) -> AdaptiveSolveResult:
     """Initialize and run an error-controlled adaptive Hermite-6 solve."""
-    return _solve_adaptive_with_diffrax(
+    return solve_adaptive_to_time(
         positions,
         velocities,
         masses,
         force_model,
-        solver_cls=Hermite6,
-        max_order=3,
         t_final=t_final,
+        order=6,
         controller=controller,
         atol=atol,
         policy=policy,
@@ -201,6 +231,15 @@ def _solve_adaptive_with_diffrax(
         dt_history=dt_history,
         next_dt=None,
     )
+
+
+def _solver_config_for_order(order: int) -> tuple[type[Hermite4] | type[Hermite6], int]:
+    """Map public Hermite order selection to solver class and derivative order."""
+    if order == 4:
+        return Hermite4, 2
+    if order == 6:
+        return Hermite6, 3
+    raise ValueError(f"Unsupported Hermite order {order}; expected 4 or 6")
 
 
 def _stabilize_state_for_solver(state, *, max_order: int):
