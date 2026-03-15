@@ -9,8 +9,8 @@ from nornax.controllers.aarseth import AarsethController, AdaptiveStepPolicy
 from nornax.forces.base import ForceModel
 from nornax.initialize import initialize_state
 from nornax.solvers.hermite4 import (
+    AdaptiveSolveResult,
     Hermite4,
-    Hermite4AdaptiveResult,
     hermite4_adaptive_scan,
 )
 from nornax.solvers.hermite6 import Hermite6
@@ -27,7 +27,7 @@ def solve_adaptive_hermite4(
     controller: AarsethController | None = None,
     time: float = 0.0,
     args: object = None,
-) -> Hermite4AdaptiveResult:
+) -> AdaptiveSolveResult:
     """Initialize and run a fixed-count adaptive Hermite-4 rollout.
 
     This helper preserves the fixed-count public API, but now aligns its solve
@@ -62,7 +62,7 @@ def solve_adaptive_hermite4(
         time=time,
         args=args,
     )
-    return Hermite4AdaptiveResult(
+    return AdaptiveSolveResult(
         final_state=result.final_state,
         dt_history=result.dt_history[:n_steps],
         next_dt=result.next_dt,
@@ -81,7 +81,7 @@ def solve_adaptive_hermite4_to_time(
     policy: AdaptiveStepPolicy | None = None,
     time: float = 0.0,
     args: object = None,
-) -> Hermite4AdaptiveResult:
+) -> AdaptiveSolveResult:
     """Initialize and run an error-controlled adaptive Hermite-4 solve."""
     return _solve_adaptive_with_diffrax(
         positions,
@@ -111,7 +111,7 @@ def solve_adaptive_hermite6_to_time(
     policy: AdaptiveStepPolicy | None = None,
     time: float = 0.0,
     args: object = None,
-) -> Hermite4AdaptiveResult:
+) -> AdaptiveSolveResult:
     """Initialize and run an error-controlled adaptive Hermite-6 solve."""
     return _solve_adaptive_with_diffrax(
         positions,
@@ -143,7 +143,7 @@ def _solve_adaptive_with_diffrax(
     policy: AdaptiveStepPolicy | None,
     time: float,
     args: object,
-) -> Hermite4AdaptiveResult:
+) -> AdaptiveSolveResult:
     """Shared Diffrax-backed adaptive solve helper for Hermite schemes."""
     diffrax = require_diffrax()
     controller = controller or AarsethController()
@@ -196,7 +196,7 @@ def _solve_adaptive_with_diffrax(
     final_index = int(jnp.sum(finite_mask)) - 1
     final_state = jax.tree.map(lambda x: x[final_index], sol.ys)
 
-    return Hermite4AdaptiveResult(
+    return AdaptiveSolveResult(
         final_state=final_state,
         dt_history=dt_history,
         next_dt=None,

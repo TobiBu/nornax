@@ -25,8 +25,8 @@ else:  # pragma: no cover - depends on external diffrax stack
 Hermite4State = NBodyState
 
 
-class Hermite4AdaptiveResult(NamedTuple):
-    """Result bundle for a fixed-count adaptive Hermite-4 rollout."""
+class AdaptiveSolveResult(NamedTuple):
+    """Result bundle for adaptive Hermite rollouts."""
 
     final_state: NBodyState
     dt_history: jnp.ndarray
@@ -145,7 +145,7 @@ def hermite4_adaptive_scan(
     *,
     n_steps: int,
     args: object = None,
-) -> Hermite4AdaptiveResult:
+) -> AdaptiveSolveResult:
     """Advance Hermite-4 for a fixed number of adaptive global steps."""
 
     def body_fn(carry: NBodyState, _):
@@ -155,7 +155,7 @@ def hermite4_adaptive_scan(
 
     final_state, dt_history = jax.lax.scan(body_fn, state, xs=None, length=n_steps)
     next_dt = controller.suggest_dt(final_state)
-    return Hermite4AdaptiveResult(
+    return AdaptiveSolveResult(
         final_state=final_state,
         dt_history=dt_history,
         next_dt=next_dt,
@@ -232,7 +232,7 @@ def hermite4_adaptive_solve(
     atol: float = 1.0e-5,
     policy: AdaptiveStepPolicy | None = None,
     args: object = None,
-) -> Hermite4AdaptiveResult:
+) -> AdaptiveSolveResult:
     """Advance Hermite-4 with adaptive acceptance until ``t_final``."""
     t_final = jnp.asarray(t_final, dtype=state.time.dtype)
     policy = policy or AdaptiveStepPolicy()
@@ -279,7 +279,7 @@ def hermite4_adaptive_solve(
         next_dt = jnp.minimum(proposed_next, grown_dt)
 
     dt_history = jnp.asarray(dt_history_list, dtype=state.positions.dtype)
-    return Hermite4AdaptiveResult(
+    return AdaptiveSolveResult(
         final_state=current_state,
         dt_history=dt_history,
         next_dt=next_dt,
