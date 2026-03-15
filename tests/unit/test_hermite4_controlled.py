@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from nornax.controllers import AarsethController, AdaptiveStepPolicy
 from nornax.solvers.hermite4 import (
+    hermite4_adaptive_solve,
     hermite4_controlled_step,
     hermite4_step_doubling_error,
 )
@@ -69,3 +71,18 @@ def test_controlled_step_rejects_large_error_and_preserves_state() -> None:
     assert not bool(result.accepted)
     assert jnp.allclose(result.accepted_state.positions, state.positions)
     assert jnp.allclose(result.accepted_state.velocities, state.velocities)
+
+
+def test_adaptive_solve_reports_next_dt_for_follow_on_steps() -> None:
+    """Adaptive solve should return a proposed next timestep."""
+    result = hermite4_adaptive_solve(
+        _initial_state(),
+        _OscillatorForce(),
+        AarsethController(eta=0.3, min_dt=1.0e-3, max_dt=0.2),
+        t_final=0.2,
+        atol=1.0e-6,
+        policy=AdaptiveStepPolicy(),
+    )
+
+    assert result.next_dt is not None
+    assert float(result.next_dt) > 0.0

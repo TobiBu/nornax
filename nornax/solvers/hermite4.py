@@ -8,7 +8,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from nornax.controllers.aarseth import AarsethController
+from nornax.controllers.aarseth import AarsethController, AdaptiveStepPolicy
 from nornax.forces.base import ForceModel
 from nornax.state import NBodyState
 from nornax.terms import NBodyTerm
@@ -30,6 +30,7 @@ class Hermite4AdaptiveResult(NamedTuple):
 
     final_state: NBodyState
     dt_history: jnp.ndarray
+    next_dt: jnp.ndarray | None = None
 
 
 class Hermite4ControlledStep(NamedTuple):
@@ -145,7 +146,12 @@ def hermite4_adaptive_scan(
         return nxt, dt
 
     final_state, dt_history = jax.lax.scan(body_fn, state, xs=None, length=n_steps)
-    return Hermite4AdaptiveResult(final_state=final_state, dt_history=dt_history)
+    next_dt = controller.suggest_dt(final_state)
+    return Hermite4AdaptiveResult(
+        final_state=final_state,
+        dt_history=dt_history,
+        next_dt=next_dt,
+    )
 
 
 def hermite4_step_doubling_error(
@@ -214,22 +220,24 @@ def hermite4_adaptive_solve(
     *,
     t_final: float,
     atol: float = 1.0e-5,
-    max_attempts: int = 8,
+    policy: AdaptiveStepPolicy | None = None,
     args: object = None,
 ) -> Hermite4AdaptiveResult:
     """Advance Hermite-4 with adaptive acceptance until ``t_final``."""
     t_final = jnp.asarray(t_final, dtype=state.time.dtype)
+    policy = policy or AdaptiveStepPolicy()
     current_state = state
     dt_history_list: list[jnp.ndarray] = []
+    next_dt = controller.suggest_dt(current_state)
 
     while float(current_state.time) < float(t_final):
-        suggested_dt = controller.suggest_dt(current_state)
         remaining = jnp.maximum(t_final - current_state.time, 0.0)
-        dt_try = jnp.minimum(suggested_dt, remaining)
+        dt_try = jnp.minimum(next_dt, remaining)
 
         accepted = False
         accepted_state = current_state
-        for _ in range(max_attempts):
+        accepted_dt = dt_try
+        for _ in range(policy.max_attempts):
             proposal = hermite4_controlled_step(
                 current_state,
                 dt_try,
@@ -240,19 +248,32 @@ def hermite4_adaptive_solve(
             if bool(proposal.accepted):
                 accepted = True
                 accepted_state = proposal.accepted_state
+                accepted_dt = proposal.dt
                 break
-            dt_try = 0.5 * dt_try
+            dt_try = policy.shrink_dt(dt_try, controller.min_dt)
 
         if not accepted:
+            if not policy.force_last_attempt:
+                raise RuntimeError(
+                    "adaptive Hermite-4 step failed to meet tolerance within max_attempts"
+                )
             accepted_state = hermite4_step(
                 current_state, dt_try, force_model, args=args
             )
+            accepted_dt = dt_try
 
-        dt_history_list.append(accepted_state.time - current_state.time)
+        dt_history_list.append(accepted_dt)
         current_state = accepted_state
+        proposed_next = controller.suggest_dt(current_state)
+        grown_dt = policy.grow_dt(accepted_dt, controller.max_dt)
+        next_dt = jnp.minimum(proposed_next, grown_dt)
 
     dt_history = jnp.asarray(dt_history_list, dtype=state.positions.dtype)
-    return Hermite4AdaptiveResult(final_state=current_state, dt_history=dt_history)
+    return Hermite4AdaptiveResult(
+        final_state=current_state,
+        dt_history=dt_history,
+        next_dt=next_dt,
+    )
 
 
 if dfx is not None:  # pragma: no cover - depends on external diffrax stack

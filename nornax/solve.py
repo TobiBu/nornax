@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from nornax.controllers.aarseth import AarsethController
+from nornax.controllers.aarseth import AarsethController, AdaptiveStepPolicy
 from nornax.forces.base import ForceModel
 from nornax.initialize import initialize_state
 from nornax.solvers.hermite4 import (
@@ -58,7 +58,7 @@ def solve_adaptive_hermite4_to_time(
     t_final: float,
     controller: AarsethController | None = None,
     atol: float = 1.0e-5,
-    max_attempts: int = 8,
+    policy: AdaptiveStepPolicy | None = None,
     time: float = 0.0,
     args: object = None,
 ) -> Hermite4AdaptiveResult:
@@ -78,6 +78,6 @@ def solve_adaptive_hermite4_to_time(
         controller or AarsethController(),
         t_final=t_final,
         atol=atol,
-        max_attempts=max_attempts,
+        policy=policy,
         args=args,
     )
