@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import jax.numpy as jnp
 
 from nornax.forces.base import ForceModel
 from nornax.state import ForceDerivatives, NBodyState
+from nornax.terms import NBodyTerm
+
+try:
+    import diffrax as dfx
+except Exception as exc:  # pragma: no cover - exercised only with incompatible envs
+    dfx = None
+    _DIFFRAX_IMPORT_ERROR = exc
+else:  # pragma: no cover - depends on external diffrax stack
+    _DIFFRAX_IMPORT_ERROR = None
 
 
 def hermite6_step(
@@ -90,6 +101,49 @@ def hermite6_step(
     )
 
 
+def hermite6_step_doubling_error(
+    state: NBodyState,
+    dt: jnp.ndarray,
+    force_model: ForceModel,
+    *,
+    args: object = None,
+) -> tuple[NBodyState, NBodyState, NBodyState]:
+    """Return full-step and refined two-half-step Hermite-6 proposals."""
+    dt = jnp.asarray(dt, dtype=state.positions.dtype)
+    trial_state = hermite6_step(state, dt, force_model, args=args)
+    half_dt = 0.5 * dt
+    mid_state = hermite6_step(state, half_dt, force_model, args=args)
+    refined_state = hermite6_step(mid_state, half_dt, force_model, args=args)
+    return trial_state, mid_state, refined_state
+
+
+def state_difference(a: NBodyState, b: NBodyState) -> NBodyState:
+    """Return a PyTree difference suitable for Diffrax error controllers."""
+    jerk_a = a.derivs.jerk
+    jerk_b = b.derivs.jerk
+    snap_a = a.derivs.snap
+    snap_b = b.derivs.snap
+    crackle_a = a.derivs.crackle
+    crackle_b = b.derivs.crackle
+    zeros = jnp.zeros_like(a.derivs.acc)
+    return NBodyState(
+        positions=a.positions - b.positions,
+        velocities=a.velocities - b.velocities,
+        masses=jnp.zeros_like(a.masses),
+        time=a.time - b.time,
+        derivs=ForceDerivatives(
+            acc=a.derivs.acc - b.derivs.acc,
+            jerk=zeros if jerk_a is None or jerk_b is None else jerk_a - jerk_b,
+            snap=zeros if snap_a is None or snap_b is None else snap_a - snap_b,
+            crackle=(
+                zeros
+                if crackle_a is None or crackle_b is None
+                else crackle_a - crackle_b
+            ),
+        ),
+    )
+
+
 def require_derivative(value: jnp.ndarray | None, name: str) -> jnp.ndarray:
     """Return a cached derivative, raising a clear error if missing."""
     if value is None:
@@ -122,3 +176,53 @@ def reconstruct_crackle_end(
     a4_half = (1.0 / h**4) * 1.5 * (-j_minus + s_plus)
     a5_half = (1.0 / h**5) * 7.5 * (3.0 * a_minus - 3.0 * j_plus + s_minus)
     return a3_half + h * a4_half + 0.5 * h**2 * a5_half
+
+
+if dfx is not None:  # pragma: no cover - depends on external diffrax stack
+
+    @dataclass
+    class Hermite6(dfx.AbstractSolver):
+        """Diffrax-facing Hermite-6 solver built on the standalone kernel."""
+
+        force_model: ForceModel
+        term_structure = NBodyTerm
+        interpolation_cls = dfx.LocalLinearInterpolation
+
+        def func(self, terms, t0, y0, args):
+            return terms.vf(t0, y0, args)
+
+        def order(self, terms):
+            del terms
+            return 6
+
+        def init(self, terms, t0, t1, y0, args):
+            del terms, t0, t1, args
+            return y0
+
+        def step(self, terms, t0, t1, y0, args, solver_state, made_jump):
+            del made_jump
+            force_model = getattr(terms, "force_model", self.force_model)
+            trial_state, _, refined_state = hermite6_step_doubling_error(
+                y0,
+                jnp.asarray(t1 - t0, dtype=y0.positions.dtype),
+                force_model,
+                args=args,
+            )
+            y_error = state_difference(refined_state, trial_state)
+            dense_info = {"y0": y0, "y1": refined_state}
+            result = dfx.RESULTS.successful
+            return refined_state, y_error, dense_info, solver_state, result
+
+else:
+
+    @dataclass
+    class Hermite6:
+        """Placeholder surfaced when Diffrax cannot be imported locally."""
+
+        force_model: ForceModel
+
+        def __post_init__(self) -> None:
+            raise ImportError(
+                "Diffrax is required for nornax.solvers.Hermite6, but the "
+                "installed diffrax/equinox/jaxtyping stack is incompatible."
+            ) from _DIFFRAX_IMPORT_ERROR
