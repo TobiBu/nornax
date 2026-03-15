@@ -29,7 +29,7 @@ class _OscillatorForce:
 
 
 def test_solve_adaptive_hermite4_runs_from_raw_arrays() -> None:
-    """The public helper should initialize and integrate in one call."""
+    """The public helper should return a fixed-count window of accepted steps."""
     result = solve_adaptive_hermite4(
         jnp.asarray([[1.0, 0.0, 0.0]]),
         jnp.asarray([[0.0, 1.0, 0.0]]),
@@ -42,4 +42,5 @@ def test_solve_adaptive_hermite4_runs_from_raw_arrays() -> None:
 
     assert result.dt_history.shape == (6,)
     assert float(result.final_state.time) > 0.25
+    assert jnp.all(result.dt_history > 0.0)
     assert result.final_state.positions.shape == (1, 3)
