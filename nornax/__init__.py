@@ -7,6 +7,7 @@ from .solve import (
     solve_adaptive_hermite4,
     solve_adaptive_hermite4_to_time,
     solve_adaptive_hermite6_to_time,
+    solve_adaptive_hermite8_to_time,
     solve_adaptive_to_time,
 )
 from .state import ForceDerivatives, NBodyState
@@ -23,4 +24,5 @@ __all__ = [
     "solve_adaptive_hermite4",
     "solve_adaptive_hermite4_to_time",
     "solve_adaptive_hermite6_to_time",
+    "solve_adaptive_hermite8_to_time",
 ]

@@ -210,9 +210,7 @@ def reconstruct_predictor_derivatives_end(
     c_plus = h**3 * (crackle1 + crackle0)
     c_minus = h**3 * (crackle1 - crackle0)
 
-    pop_mid = (24.0 / h**4) * (
-        (1.0 / 32.0) * (-5.0 * j_minus + 5.0 * s_plus - c_minus)
-    )
+    pop_mid = (24.0 / h**4) * ((1.0 / 32.0) * (-5.0 * j_minus + 5.0 * s_plus - c_minus))
     d6_mid = (720.0 / h**6) * (
         (1.0 / 32.0) * (j_minus - s_plus + (1.0 / 3.0) * c_minus)
     )
@@ -221,7 +219,8 @@ def reconstruct_predictor_derivatives_end(
         (1.0 / 32.0) * (21.0 * a_minus - 21.0 * j_plus + 8.0 * s_minus - c_plus)
     )
     d7_mid = (5040.0 / h**7) * (
-        (1.0 / 32.0) * (-5.0 * a_minus + 5.0 * j_plus - 2.0 * s_minus + (1.0 / 3.0) * c_plus)
+        (1.0 / 32.0)
+        * (-5.0 * a_minus + 5.0 * j_plus - 2.0 * s_minus + (1.0 / 3.0) * c_plus)
     )
 
     pop_end = pop_mid + h * d5_mid + 0.5 * h**2 * d6_mid + (1.0 / 6.0) * h**3 * d7_mid

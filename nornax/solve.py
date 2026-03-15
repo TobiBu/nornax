@@ -14,6 +14,7 @@ from nornax.solvers.hermite4 import (
     hermite4_adaptive_scan,
 )
 from nornax.solvers.hermite6 import Hermite6
+from nornax.solvers.hermite8 import Hermite8
 from nornax.terms import NBodyTerm, require_diffrax
 
 
@@ -159,6 +160,35 @@ def solve_adaptive_hermite6_to_time(
     )
 
 
+def solve_adaptive_hermite8_to_time(
+    positions: jnp.ndarray,
+    velocities: jnp.ndarray,
+    masses: jnp.ndarray,
+    force_model: ForceModel,
+    *,
+    t_final: float,
+    controller: AarsethController | None = None,
+    atol: float = 1.0e-5,
+    policy: AdaptiveStepPolicy | None = None,
+    time: float = 0.0,
+    args: object = None,
+) -> AdaptiveSolveResult:
+    """Initialize and run an error-controlled adaptive Hermite-8 solve."""
+    return solve_adaptive_to_time(
+        positions,
+        velocities,
+        masses,
+        force_model,
+        t_final=t_final,
+        order=8,
+        controller=controller,
+        atol=atol,
+        policy=policy,
+        time=time,
+        args=args,
+    )
+
+
 def _solve_adaptive_with_diffrax(
     positions: jnp.ndarray,
     velocities: jnp.ndarray,
@@ -233,13 +263,17 @@ def _solve_adaptive_with_diffrax(
     )
 
 
-def _solver_config_for_order(order: int) -> tuple[type[Hermite4] | type[Hermite6], int]:
+def _solver_config_for_order(
+    order: int,
+) -> tuple[type[Hermite4] | type[Hermite6] | type[Hermite8], int]:
     """Map public Hermite order selection to solver class and derivative order."""
     if order == 4:
         return Hermite4, 2
     if order == 6:
         return Hermite6, 3
-    raise ValueError(f"Unsupported Hermite order {order}; expected 4 or 6")
+    if order == 8:
+        return Hermite8, 4
+    raise ValueError(f"Unsupported Hermite order {order}; expected 4, 6, or 8")
 
 
 def _stabilize_state_for_solver(state, *, max_order: int):
@@ -253,5 +287,11 @@ def _stabilize_state_for_solver(state, *, max_order: int):
     derivs = state.derivs
     if max_order >= 3 and derivs.crackle is None:
         derivs = derivs._replace(crackle=jnp.zeros_like(derivs.acc))
-        state = state._replace(derivs=derivs)
+    if max_order >= 4:
+        zeros = jnp.zeros_like(derivs.acc)
+        if derivs.pop is None:
+            derivs = derivs._replace(pop=zeros)
+        if derivs.d5 is None:
+            derivs = derivs._replace(d5=zeros)
+    state = state._replace(derivs=derivs)
     return state
