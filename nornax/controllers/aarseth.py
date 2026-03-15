@@ -76,6 +76,40 @@ def aarseth_timestep_6th_order(
     )
 
 
+def aarseth_timestep_8th_order(
+    accelerations: jnp.ndarray,
+    jerks: jnp.ndarray,
+    snaps: jnp.ndarray,
+    d5: jnp.ndarray,
+    d6: jnp.ndarray,
+    d7: jnp.ndarray,
+    *,
+    eta: float,
+    min_dt: float,
+    max_dt: float,
+) -> jnp.ndarray:
+    """Return the generalized eighth-order Aarseth/Nitadori-Makino timestep."""
+    eps = jnp.asarray(1.0e-30, dtype=accelerations.dtype)
+    a0_norm = jnp.linalg.norm(accelerations, axis=-1)
+    a1_norm = jnp.linalg.norm(jerks, axis=-1)
+    a2_norm = jnp.linalg.norm(snaps, axis=-1)
+    a5_norm = jnp.linalg.norm(d5, axis=-1)
+    a6_norm = jnp.linalg.norm(d6, axis=-1)
+    a7_norm = jnp.linalg.norm(d7, axis=-1)
+    a1 = jnp.sqrt(a0_norm * a2_norm + jnp.square(a1_norm))
+    a6 = jnp.sqrt(a5_norm * a7_norm + jnp.square(a6_norm))
+    dt_i = jnp.asarray(eta, dtype=accelerations.dtype) * jnp.power(
+        a1 / (a6 + eps),
+        0.2,
+    )
+    dt = jnp.min(dt_i)
+    return jnp.clip(
+        dt,
+        jnp.asarray(min_dt, dtype=accelerations.dtype),
+        jnp.asarray(max_dt, dtype=accelerations.dtype),
+    )
+
+
 @dataclass(frozen=True)
 class AarsethController:
     """Global adaptive timestep controller for Hermite integrators."""
@@ -96,6 +130,27 @@ class AarsethController:
             raise ValueError("AarsethController requires jerk in the state cache")
         snap = state.derivs.snap
         crackle = state.derivs.crackle
+        d5 = state.derivs.d5
+        d6 = state.derivs.d6
+        d7 = state.derivs.d7
+        if (
+            order >= 8
+            and snap is not None
+            and d5 is not None
+            and d6 is not None
+            and d7 is not None
+        ):
+            return aarseth_timestep_8th_order(
+                state.derivs.acc,
+                jerk,
+                snap,
+                d5,
+                d6,
+                d7,
+                eta=self.eta,
+                min_dt=self.min_dt,
+                max_dt=self.max_dt,
+            )
         if order >= 6 and snap is not None and crackle is not None:
             return aarseth_timestep_6th_order(
                 state.derivs.acc,

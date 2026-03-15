@@ -5,6 +5,7 @@ from .aarseth import (
     AdaptiveStepPolicy,
     aarseth_timestep,
     aarseth_timestep_6th_order,
+    aarseth_timestep_8th_order,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "AdaptiveStepPolicy",
     "aarseth_timestep",
     "aarseth_timestep_6th_order",
+    "aarseth_timestep_8th_order",
 ]

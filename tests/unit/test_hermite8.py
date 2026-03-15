@@ -53,6 +53,8 @@ def _initial_state() -> NBodyState:
             crackle=jnp.asarray([[0.0, 1.0, 0.0]]),
             pop=jnp.asarray([[-1.0, 0.0, 0.0]]),
             d5=jnp.asarray([[0.0, -1.0, 0.0]]),
+            d6=jnp.asarray([[1.0, 0.0, 0.0]]),
+            d7=jnp.asarray([[0.0, 1.0, 0.0]]),
         ),
     )
 
@@ -65,6 +67,8 @@ def test_hermite8_step_populates_predictor_cache_for_next_step() -> None:
     assert nxt.derivs.crackle is not None
     assert nxt.derivs.pop is not None
     assert nxt.derivs.d5 is not None
+    assert nxt.derivs.d6 is not None
+    assert nxt.derivs.d7 is not None
     assert nxt.derivs.pop.shape == state.positions.shape
     assert nxt.derivs.d5.shape == state.positions.shape
 

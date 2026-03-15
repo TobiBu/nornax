@@ -54,3 +54,5 @@ def test_solve_adaptive_hermite8_to_time_runs_from_raw_arrays() -> None:
     assert result.final_state.positions.shape == (1, 3)
     assert result.final_state.derivs.pop is not None
     assert result.final_state.derivs.d5 is not None
+    assert result.final_state.derivs.d6 is not None
+    assert result.final_state.derivs.d7 is not None

@@ -22,6 +22,8 @@ class ForceDerivatives(NamedTuple):
     crackle: jnp.ndarray | None = None
     pop: jnp.ndarray | None = None
     d5: jnp.ndarray | None = None
+    d6: jnp.ndarray | None = None
+    d7: jnp.ndarray | None = None
 
 
 class NBodyState(NamedTuple):

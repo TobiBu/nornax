@@ -98,3 +98,5 @@ def test_solve_adaptive_to_time_supports_hermite8() -> None:
     assert result.final_state.derivs.crackle is not None
     assert result.final_state.derivs.pop is not None
     assert result.final_state.derivs.d5 is not None
+    assert result.final_state.derivs.d6 is not None
+    assert result.final_state.derivs.d7 is not None

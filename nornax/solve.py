@@ -293,5 +293,9 @@ def _stabilize_state_for_solver(state, *, max_order: int):
             derivs = derivs._replace(pop=zeros)
         if derivs.d5 is None:
             derivs = derivs._replace(d5=zeros)
+        if derivs.d6 is None:
+            derivs = derivs._replace(d6=zeros)
+        if derivs.d7 is None:
+            derivs = derivs._replace(d7=zeros)
     state = state._replace(derivs=derivs)
     return state

@@ -8,6 +8,7 @@ from nornax.controllers import (
     AarsethController,
     aarseth_timestep,
     aarseth_timestep_6th_order,
+    aarseth_timestep_8th_order,
 )
 from nornax.state import ForceDerivatives, NBodyState
 
@@ -96,3 +97,39 @@ def test_aarseth_controller_uses_6th_order_formula_when_available() -> None:
 
     assert abs(float(dt6) - float(expected_dt6)) < 1.0e-12
     assert abs(float(dt6) - float(dt4)) > 1.0e-12
+
+
+def test_aarseth_controller_uses_8th_order_formula_when_available() -> None:
+    """Hermite-8 timestep proposals should use the higher-order generalized form."""
+    state = NBodyState(
+        positions=jnp.zeros((1, 3)),
+        velocities=jnp.zeros((1, 3)),
+        masses=jnp.ones((1,)),
+        time=jnp.asarray(0.0),
+        derivs=ForceDerivatives(
+            acc=jnp.asarray([[2.0, 0.0, 0.0]]),
+            jerk=jnp.asarray([[1.0, 0.0, 0.0]]),
+            snap=jnp.asarray([[4.0, 0.0, 0.0]]),
+            crackle=jnp.asarray([[8.0, 0.0, 0.0]]),
+            d5=jnp.asarray([[16.0, 0.0, 0.0]]),
+            d6=jnp.asarray([[32.0, 0.0, 0.0]]),
+            d7=jnp.asarray([[64.0, 0.0, 0.0]]),
+        ),
+    )
+
+    controller = AarsethController(eta=0.1, min_dt=1.0e-6, max_dt=1.0)
+
+    dt8 = controller.suggest_dt(state, order=8)
+    expected_dt8 = aarseth_timestep_8th_order(
+        state.derivs.acc,
+        state.derivs.jerk,
+        state.derivs.snap,
+        state.derivs.d5,
+        state.derivs.d6,
+        state.derivs.d7,
+        eta=controller.eta,
+        min_dt=controller.min_dt,
+        max_dt=controller.max_dt,
+    )
+
+    assert abs(float(dt8) - float(expected_dt8)) < 1.0e-12

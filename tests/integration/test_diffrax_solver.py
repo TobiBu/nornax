@@ -124,6 +124,8 @@ def test_diffrax_hermite8_smoke_runs_with_custom_solver() -> None:
         derivs=y0.derivs._replace(
             pop=zeros,
             d5=zeros,
+            d6=zeros,
+            d7=zeros,
         )
     )
 
@@ -144,5 +146,7 @@ def test_diffrax_hermite8_smoke_runs_with_custom_solver() -> None:
     assert y1.derivs.crackle is not None
     assert y1.derivs.pop is not None
     assert y1.derivs.d5 is not None
+    assert y1.derivs.d6 is not None
+    assert y1.derivs.d7 is not None
     assert jnp.all(jnp.isfinite(y1.positions))
     assert jnp.all(jnp.isfinite(y1.velocities))

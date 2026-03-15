@@ -39,10 +39,16 @@ def hermite8_step(
     crackle0 = require_derivative(state.derivs.crackle, "crackle")
     pop0 = state.derivs.pop
     d5_0 = state.derivs.d5
+    d6_0 = state.derivs.d6
+    d7_0 = state.derivs.d7
     if pop0 is None:
         pop0 = jnp.zeros_like(acc0)
     if d5_0 is None:
         d5_0 = jnp.zeros_like(acc0)
+    if d6_0 is None:
+        d6_0 = jnp.zeros_like(acc0)
+    if d7_0 is None:
+        d7_0 = jnp.zeros_like(acc0)
 
     r_pred = (
         state.positions
@@ -108,7 +114,7 @@ def hermite8_step(
         - (1.0 / 1680.0) * (snap1 - snap0) * dt**4
     )
 
-    pop1, d5_1 = reconstruct_predictor_derivatives_end(
+    pop1, d5_1, d6_1, d7_1 = reconstruct_predictor_derivatives_end(
         acc0,
         jerk0,
         snap0,
@@ -131,6 +137,8 @@ def hermite8_step(
             crackle=crackle1,
             pop=pop1,
             d5=d5_1,
+            d6=d6_1,
+            d7=d7_1,
         ),
     )
 
@@ -173,6 +181,8 @@ def state_difference(a: NBodyState, b: NBodyState, *, scale: float = 1.0) -> NBo
             crackle=diff_or_zero(a.derivs.crackle, b.derivs.crackle),
             pop=diff_or_zero(a.derivs.pop, b.derivs.pop),
             d5=diff_or_zero(a.derivs.d5, b.derivs.d5),
+            d6=diff_or_zero(a.derivs.d6, b.derivs.d6),
+            d7=diff_or_zero(a.derivs.d7, b.derivs.d7),
         ),
     )
 
@@ -194,7 +204,7 @@ def reconstruct_predictor_derivatives_end(
     snap1: jnp.ndarray,
     crackle1: jnp.ndarray,
     dt: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Reconstruct pop and 5th derivative at the end of the step.
 
     This follows Appendix A.2 of Nitadori and Makino (2008): first reconstruct
@@ -225,7 +235,9 @@ def reconstruct_predictor_derivatives_end(
 
     pop_end = pop_mid + h * d5_mid + 0.5 * h**2 * d6_mid + (1.0 / 6.0) * h**3 * d7_mid
     d5_end = d5_mid + h * d6_mid + 0.5 * h**2 * d7_mid
-    return pop_end, d5_end
+    d6_end = d6_mid + h * d7_mid
+    d7_end = d7_mid
+    return pop_end, d5_end, d6_end, d7_end
 
 
 if dfx is not None:  # pragma: no cover - depends on external diffrax stack
