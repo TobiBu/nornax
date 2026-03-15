@@ -13,6 +13,7 @@ from nornax.solvers.hermite4 import (
     Hermite4AdaptiveResult,
     hermite4_adaptive_scan,
 )
+from nornax.solvers.hermite6 import Hermite6
 from nornax.terms import NBodyTerm, require_diffrax
 
 
@@ -81,12 +82,69 @@ def solve_adaptive_hermite4_to_time(
     time: float = 0.0,
     args: object = None,
 ) -> Hermite4AdaptiveResult:
-    """Initialize and run an error-controlled adaptive Hermite-4 solve.
+    """Initialize and run an error-controlled adaptive Hermite-4 solve."""
+    return _solve_adaptive_with_diffrax(
+        positions,
+        velocities,
+        masses,
+        force_model,
+        solver_cls=Hermite4,
+        max_order=2,
+        t_final=t_final,
+        controller=controller,
+        atol=atol,
+        policy=policy,
+        time=time,
+        args=args,
+    )
 
-    This higher-level helper now routes through ``diffrax.diffeqsolve(...)``.
-    Nornax still supplies the Hermite-specific step and error estimate, while
-    Diffrax owns adaptive acceptance and timestep updates.
-    """
+
+def solve_adaptive_hermite6_to_time(
+    positions: jnp.ndarray,
+    velocities: jnp.ndarray,
+    masses: jnp.ndarray,
+    force_model: ForceModel,
+    *,
+    t_final: float,
+    controller: AarsethController | None = None,
+    atol: float = 1.0e-5,
+    policy: AdaptiveStepPolicy | None = None,
+    time: float = 0.0,
+    args: object = None,
+) -> Hermite4AdaptiveResult:
+    """Initialize and run an error-controlled adaptive Hermite-6 solve."""
+    return _solve_adaptive_with_diffrax(
+        positions,
+        velocities,
+        masses,
+        force_model,
+        solver_cls=Hermite6,
+        max_order=3,
+        t_final=t_final,
+        controller=controller,
+        atol=atol,
+        policy=policy,
+        time=time,
+        args=args,
+    )
+
+
+def _solve_adaptive_with_diffrax(
+    positions: jnp.ndarray,
+    velocities: jnp.ndarray,
+    masses: jnp.ndarray,
+    force_model: ForceModel,
+    *,
+    solver_cls,
+    max_order: int,
+    t_final: float,
+    controller: AarsethController | None,
+    atol: float,
+    policy: AdaptiveStepPolicy | None,
+    time: float,
+    args: object,
+) -> Hermite4AdaptiveResult:
+    """Shared Diffrax-backed adaptive solve helper for Hermite schemes."""
     diffrax = require_diffrax()
     controller = controller or AarsethController()
     policy = policy or AdaptiveStepPolicy()
@@ -96,16 +154,23 @@ def solve_adaptive_hermite4_to_time(
         masses,
         force_model,
         time=time,
-        max_order=2,
+        max_order=max_order,
         args=args,
     )
+    state = _stabilize_state_for_solver(state, max_order=max_order)
     t0 = jnp.asarray(time, dtype=state.time.dtype)
     t1 = jnp.asarray(t_final, dtype=state.time.dtype)
     dt0 = controller.suggest_dt(state)
 
+    step_budget = max(
+        int(jnp.ceil((float(t1) - float(t0)) / controller.min_dt)) + 1,
+        16,
+    )
+    max_steps = step_budget * max(policy.max_attempts + 1, 4)
+
     sol = diffrax.diffeqsolve(
         terms=NBodyTerm(force_model=force_model),
-        solver=Hermite4(force_model=force_model),
+        solver=solver_cls(force_model=force_model),
         t0=t0,
         t1=t1,
         dt0=dt0,
@@ -121,10 +186,7 @@ def solve_adaptive_hermite4_to_time(
             factormax=policy.grow_factor,
             force_dtmin=policy.force_last_attempt,
         ),
-        max_steps=max(
-            int(jnp.ceil((float(t1) - float(t0)) / controller.min_dt)) + 1,
-            16,
-        ),
+        max_steps=max_steps,
         throw=not policy.force_last_attempt,
     )
 
@@ -139,3 +201,18 @@ def solve_adaptive_hermite4_to_time(
         dt_history=dt_history,
         next_dt=None,
     )
+
+
+def _stabilize_state_for_solver(state, *, max_order: int):
+    """Fill optional derivative leaves needed by higher-order adaptive solvers.
+
+    Diffrax's adaptive controllers require a stable PyTree structure across
+    candidate states and local error estimates. Hermite-6 reconstructs crackle
+    during stepping, so we seed that leaf with zeros when starting from raw
+    initialized state.
+    """
+    derivs = state.derivs
+    if max_order >= 3 and derivs.crackle is None:
+        derivs = derivs._replace(crackle=jnp.zeros_like(derivs.acc))
+        state = state._replace(derivs=derivs)
+    return state
