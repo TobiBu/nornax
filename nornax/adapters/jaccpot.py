@@ -89,7 +89,9 @@ class JaccpotForceModel:
             runtime_kwargs.update(args.to_kwargs())
             return runtime_kwargs
         if isinstance(args, Mapping):
-            runtime_kwargs.update({key: value for key, value in args.items() if value is not None})
+            runtime_kwargs.update(
+                {key: value for key, value in args.items() if value is not None}
+            )
             return runtime_kwargs
         raise TypeError(
             "jaccpot adapter args must be None, JaccpotOptions, or a mapping of runtime kwargs"
@@ -100,7 +102,5 @@ class JaccpotForceModel:
         """Drop jerk-only options for acceleration-only calls."""
         jerk_only = {"jerk_mode", "jerk_fd_dt"}
         return {
-            key: value
-            for key, value in runtime_kwargs.items()
-            if key not in jerk_only
+            key: value for key, value in runtime_kwargs.items() if key not in jerk_only
         }

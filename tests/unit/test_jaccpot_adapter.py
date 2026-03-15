@@ -51,7 +51,9 @@ def test_jaccpot_adapter_supports_acceleration_only_calls() -> None:
 def test_jaccpot_adapter_supports_jerk_calls_and_arg_overrides() -> None:
     """Per-call options should override adapter defaults for jerk requests."""
     solver = _FakeJaccpotSolver()
-    model = JaccpotForceModel(solver, JaccpotOptions(leaf_size=16, jerk_mode="accurate"))
+    model = JaccpotForceModel(
+        solver, JaccpotOptions(leaf_size=16, jerk_mode="accurate")
+    )
 
     derivs = model.derivatives(
         jnp.asarray(0.0),
@@ -93,7 +95,9 @@ def test_jaccpot_adapter_rejects_higher_time_derivative_requests() -> None:
 def test_jaccpot_adapter_accepts_options_objects_as_args() -> None:
     """Per-call option objects should merge cleanly into runtime kwargs."""
     solver = _FakeJaccpotSolver()
-    model = JaccpotForceModel(solver, JaccpotOptions(leaf_size=16, jerk_mode="accurate"))
+    model = JaccpotForceModel(
+        solver, JaccpotOptions(leaf_size=16, jerk_mode="accurate")
+    )
 
     model.derivatives(
         jnp.asarray(0.0),
