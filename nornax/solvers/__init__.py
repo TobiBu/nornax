@@ -7,6 +7,7 @@ from .hermite4 import (
     hermite4_adaptive_scan,
     hermite4_step,
 )
+from .hermite6 import hermite6_step
 
 __all__ = [
     "Hermite4",
@@ -14,4 +15,5 @@ __all__ = [
     "Hermite4State",
     "hermite4_adaptive_scan",
     "hermite4_step",
+    "hermite6_step",
 ]
