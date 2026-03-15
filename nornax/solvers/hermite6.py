@@ -19,6 +19,11 @@ else:  # pragma: no cover - depends on external diffrax stack
     _DIFFRAX_IMPORT_ERROR = None
 
 
+def _richardson_scale(order: int) -> float:
+    """Return the step-doubling correction for an order-``order`` method."""
+    return 1.0 / (2**order - 1)
+
+
 def hermite6_step(
     state: NBodyState,
     dt: jnp.ndarray,
@@ -117,8 +122,9 @@ def hermite6_step_doubling_error(
     return trial_state, mid_state, refined_state
 
 
-def state_difference(a: NBodyState, b: NBodyState) -> NBodyState:
+def state_difference(a: NBodyState, b: NBodyState, *, scale: float = 1.0) -> NBodyState:
     """Return a PyTree difference suitable for Diffrax error controllers."""
+    scale = jnp.asarray(scale, dtype=a.positions.dtype)
     jerk_a = a.derivs.jerk
     jerk_b = b.derivs.jerk
     snap_a = a.derivs.snap
@@ -127,18 +133,26 @@ def state_difference(a: NBodyState, b: NBodyState) -> NBodyState:
     crackle_b = b.derivs.crackle
     zeros = jnp.zeros_like(a.derivs.acc)
     return NBodyState(
-        positions=a.positions - b.positions,
-        velocities=a.velocities - b.velocities,
+        positions=scale * (a.positions - b.positions),
+        velocities=scale * (a.velocities - b.velocities),
         masses=jnp.zeros_like(a.masses),
-        time=a.time - b.time,
+        time=scale * (a.time - b.time),
         derivs=ForceDerivatives(
-            acc=a.derivs.acc - b.derivs.acc,
-            jerk=zeros if jerk_a is None or jerk_b is None else jerk_a - jerk_b,
-            snap=zeros if snap_a is None or snap_b is None else snap_a - snap_b,
+            acc=scale * (a.derivs.acc - b.derivs.acc),
+            jerk=(
+                scale * zeros
+                if jerk_a is None or jerk_b is None
+                else scale * (jerk_a - jerk_b)
+            ),
+            snap=(
+                scale * zeros
+                if snap_a is None or snap_b is None
+                else scale * (snap_a - snap_b)
+            ),
             crackle=(
-                zeros
+                scale * zeros
                 if crackle_a is None or crackle_b is None
-                else crackle_a - crackle_b
+                else scale * (crackle_a - crackle_b)
             ),
         ),
     )
@@ -208,7 +222,11 @@ if dfx is not None:  # pragma: no cover - depends on external diffrax stack
                 force_model,
                 args=args,
             )
-            y_error = state_difference(refined_state, trial_state)
+            y_error = state_difference(
+                refined_state,
+                trial_state,
+                scale=_richardson_scale(self.order(terms)),
+            )
             dense_info = {"y0": y0, "y1": refined_state}
             result = dfx.RESULTS.successful
             return refined_state, y_error, dense_info, solver_state, result

@@ -44,21 +44,29 @@ class Hermite4ControlledStep(NamedTuple):
     accepted: jnp.ndarray
 
 
-def _state_difference(a: NBodyState, b: NBodyState) -> NBodyState:
+def _richardson_scale(order: int) -> float:
+    """Return the step-doubling correction for an order-``order`` method."""
+    return 1.0 / (2**order - 1)
+
+
+def _state_difference(
+    a: NBodyState, b: NBodyState, *, scale: float = 1.0
+) -> NBodyState:
     """Return a PyTree difference suitable for Diffrax error controllers."""
+    scale = jnp.asarray(scale, dtype=a.positions.dtype)
     jerk_a = a.derivs.jerk
     jerk_b = b.derivs.jerk
     if jerk_a is None or jerk_b is None:
         jerk_diff = None
     else:
-        jerk_diff = jerk_a - jerk_b
+        jerk_diff = scale * (jerk_a - jerk_b)
     return NBodyState(
-        positions=a.positions - b.positions,
-        velocities=a.velocities - b.velocities,
+        positions=scale * (a.positions - b.positions),
+        velocities=scale * (a.velocities - b.velocities),
         masses=jnp.zeros_like(a.masses),
-        time=a.time - b.time,
+        time=scale * (a.time - b.time),
         derivs=type(a.derivs)(
-            acc=a.derivs.acc - b.derivs.acc,
+            acc=scale * (a.derivs.acc - b.derivs.acc),
             jerk=jerk_diff,
             snap=None,
             crackle=None,
@@ -175,7 +183,9 @@ def hermite4_step_doubling_error(
     vel_err = jnp.max(
         jnp.linalg.norm(refined_state.velocities - trial_state.velocities, axis=-1)
     )
-    error_estimate = jnp.maximum(pos_err, vel_err)
+    error_estimate = jnp.asarray(_richardson_scale(4), dtype=dt.dtype) * jnp.maximum(
+        pos_err, vel_err
+    )
 
     return Hermite4ControlledStep(
         accepted_state=refined_state,
@@ -312,7 +322,11 @@ if dfx is not None:  # pragma: no cover - depends on external diffrax stack
                 args=args,
             )
             y1 = proposal.refined_state
-            y_error = _state_difference(proposal.refined_state, proposal.trial_state)
+            y_error = _state_difference(
+                proposal.refined_state,
+                proposal.trial_state,
+                scale=_richardson_scale(self.order(terms)),
+            )
             dense_info = {"y0": y0, "y1": y1}
             result = dfx.RESULTS.successful
             return y1, y_error, dense_info, solver_state, result

@@ -56,6 +56,27 @@ def test_step_doubling_error_decreases_with_smaller_dt() -> None:
     assert float(fine.error_estimate) < float(coarse.error_estimate)
 
 
+def test_step_doubling_error_uses_richardson_scaled_refined_error() -> None:
+    """The reported error should be the refined-state Richardson estimate."""
+    force_model = _OscillatorForce()
+    state = _initial_state()
+    result = hermite4_step_doubling_error(state, jnp.asarray(0.2), force_model)
+
+    raw_pos_err = jnp.max(
+        jnp.linalg.norm(
+            result.refined_state.positions - result.trial_state.positions, axis=-1
+        )
+    )
+    raw_vel_err = jnp.max(
+        jnp.linalg.norm(
+            result.refined_state.velocities - result.trial_state.velocities, axis=-1
+        )
+    )
+    raw_error = jnp.maximum(raw_pos_err, raw_vel_err)
+
+    assert abs(float(result.error_estimate) - float(raw_error / 15.0)) < 1.0e-12
+
+
 def test_controlled_step_rejects_large_error_and_preserves_state() -> None:
     """Rejected proposals should leave the state unchanged."""
     force_model = _OscillatorForce()

@@ -5,7 +5,11 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from nornax.solvers.hermite4 import hermite4_step
-from nornax.solvers.hermite6 import hermite6_step
+from nornax.solvers.hermite6 import (
+    hermite6_step,
+    hermite6_step_doubling_error,
+    state_difference,
+)
 from nornax.state import ForceDerivatives, NBodyState
 
 
@@ -77,3 +81,28 @@ def test_hermite6_is_more_accurate_than_hermite4_on_oscillator() -> None:
     err6 = float(jnp.linalg.norm(out6.positions - exact_r))
 
     assert err6 < err4
+
+
+def test_hermite6_step_doubling_error_matches_richardson_scale() -> None:
+    """Hermite-6 step-doubling differences should be scaled for refined-state error."""
+    force_model = _OscillatorForce()
+    state = _initial_state()
+
+    trial_state, _, refined_state = hermite6_step_doubling_error(
+        state,
+        jnp.asarray(0.2),
+        force_model,
+    )
+    raw_pos_err = jnp.max(
+        jnp.linalg.norm(refined_state.positions - trial_state.positions, axis=-1)
+    )
+    raw_vel_err = jnp.max(
+        jnp.linalg.norm(refined_state.velocities - trial_state.velocities, axis=-1)
+    )
+    raw_error = jnp.maximum(raw_pos_err, raw_vel_err)
+    scaled = state_difference(refined_state, trial_state, scale=1.0 / 63.0)
+    scaled_pos_err = jnp.max(jnp.linalg.norm(scaled.positions, axis=-1))
+    scaled_vel_err = jnp.max(jnp.linalg.norm(scaled.velocities, axis=-1))
+    scaled_error = jnp.maximum(scaled_pos_err, scaled_vel_err)
+
+    assert abs(float(scaled_error) - float(raw_error / 63.0)) < 1.0e-12
