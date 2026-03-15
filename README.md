@@ -70,6 +70,12 @@ Examples:
 - [examples/two_body_diffrax.py](examples/two_body_diffrax.py): adaptive two-body solve
 - [examples/compare_hermite_orders.py](examples/compare_hermite_orders.py): compare Hermite-4/6/8 energy and angular-momentum drift
 
+Notebooks:
+
+- [notebooks/hermite_orders_accuracy.ipynb](notebooks/hermite_orders_accuracy.ipynb): compare adaptive Hermite-4/6/8 drift and step counts
+- [notebooks/hermite_vs_diffrax_rk.ipynb](notebooks/hermite_vs_diffrax_rk.ipynb): compare Hermite against a standard Diffrax RK solver
+- [notebooks/direct_vs_jaccpot_backend.ipynb](notebooks/direct_vs_jaccpot_backend.ipynb): compare direct-sum and `jaccpot` backends for Hermite-4
+
 ## Jaccpot Adapter
 
 `nornax` now includes a first adapter for `jaccpot` via `JaccpotForceModel`.
