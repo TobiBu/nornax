@@ -43,6 +43,28 @@ class Hermite4ControlledStep(NamedTuple):
     accepted: jnp.ndarray
 
 
+def _state_difference(a: NBodyState, b: NBodyState) -> NBodyState:
+    """Return a PyTree difference suitable for Diffrax error controllers."""
+    jerk_a = a.derivs.jerk
+    jerk_b = b.derivs.jerk
+    if jerk_a is None or jerk_b is None:
+        jerk_diff = None
+    else:
+        jerk_diff = jerk_a - jerk_b
+    return NBodyState(
+        positions=a.positions - b.positions,
+        velocities=a.velocities - b.velocities,
+        masses=jnp.zeros_like(a.masses),
+        time=a.time - b.time,
+        derivs=type(a.derivs)(
+            acc=a.derivs.acc - b.derivs.acc,
+            jerk=jerk_diff,
+            snap=None,
+            crackle=None,
+        ),
+    )
+
+
 def hermite4_step(
     state: NBodyState,
     dt: jnp.ndarray,
@@ -262,15 +284,17 @@ if dfx is not None:  # pragma: no cover - depends on external diffrax stack
         def step(self, terms, t0, t1, y0, args, solver_state, made_jump):
             del made_jump
             force_model = getattr(terms, "force_model", self.force_model)
-            y1 = hermite4_step(
+            proposal = hermite4_step_doubling_error(
                 y0,
                 jnp.asarray(t1 - t0, dtype=y0.positions.dtype),
                 force_model,
                 args=args,
             )
+            y1 = proposal.refined_state
+            y_error = _state_difference(proposal.refined_state, proposal.trial_state)
             dense_info = {"y0": y0, "y1": y1}
             result = dfx.RESULTS.successful
-            return y1, None, dense_info, solver_state, result
+            return y1, y_error, dense_info, solver_state, result
 
 else:
 

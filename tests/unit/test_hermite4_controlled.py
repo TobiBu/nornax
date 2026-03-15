@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from nornax.solvers.hermite4 import hermite4_controlled_step, hermite4_step_doubling_error
+from nornax.solvers.hermite4 import (
+    hermite4_controlled_step,
+    hermite4_step_doubling_error,
+)
 from nornax.state import ForceDerivatives, NBodyState
 
 

@@ -7,7 +7,11 @@ import jax.numpy as jnp
 from nornax.controllers.aarseth import AarsethController
 from nornax.forces.base import ForceModel
 from nornax.initialize import initialize_state
-from nornax.solvers.hermite4 import Hermite4AdaptiveResult, hermite4_adaptive_scan
+from nornax.solvers.hermite4 import (
+    Hermite4AdaptiveResult,
+    hermite4_adaptive_scan,
+    hermite4_adaptive_solve,
+)
 
 
 def solve_adaptive_hermite4(
@@ -41,5 +45,39 @@ def solve_adaptive_hermite4(
         force_model,
         controller or AarsethController(),
         n_steps=n_steps,
+        args=args,
+    )
+
+
+def solve_adaptive_hermite4_to_time(
+    positions: jnp.ndarray,
+    velocities: jnp.ndarray,
+    masses: jnp.ndarray,
+    force_model: ForceModel,
+    *,
+    t_final: float,
+    controller: AarsethController | None = None,
+    atol: float = 1.0e-5,
+    max_attempts: int = 8,
+    time: float = 0.0,
+    args: object = None,
+) -> Hermite4AdaptiveResult:
+    """Initialize and run an error-controlled adaptive Hermite-4 solve."""
+    state = initialize_state(
+        positions,
+        velocities,
+        masses,
+        force_model,
+        time=time,
+        max_order=2,
+        args=args,
+    )
+    return hermite4_adaptive_solve(
+        state,
+        force_model,
+        controller or AarsethController(),
+        t_final=t_final,
+        atol=atol,
+        max_attempts=max_attempts,
         args=args,
     )
