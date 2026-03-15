@@ -39,19 +39,73 @@ def aarseth_timestep(
     )
 
 
+def aarseth_timestep_6th_order(
+    accelerations: jnp.ndarray,
+    jerks: jnp.ndarray,
+    snaps: jnp.ndarray,
+    crackles: jnp.ndarray,
+    *,
+    eta: float,
+    min_dt: float,
+    max_dt: float,
+) -> jnp.ndarray:
+    """Return the sixth-order Aarseth/Nitadori-Makino timestep.
+
+    This uses the higher-derivative form
+
+    ``dt_i = sqrt(eta * (|a||s| + |j|^2) / (|j||c| + |s|^2 + eps))``
+
+    with ``a`` acceleration, ``j`` jerk, ``s`` snap, and ``c`` crackle, then
+    takes the global minimum across particles.
+    """
+    eps = jnp.asarray(1.0e-30, dtype=accelerations.dtype)
+    a_norm = jnp.linalg.norm(accelerations, axis=-1)
+    j_norm = jnp.linalg.norm(jerks, axis=-1)
+    s_norm = jnp.linalg.norm(snaps, axis=-1)
+    c_norm = jnp.linalg.norm(crackles, axis=-1)
+    numerator = a_norm * s_norm + jnp.square(j_norm)
+    denominator = j_norm * c_norm + jnp.square(s_norm) + eps
+    dt_i = jnp.sqrt(
+        jnp.asarray(eta, dtype=accelerations.dtype) * numerator / denominator
+    )
+    dt = jnp.min(dt_i)
+    return jnp.clip(
+        dt,
+        jnp.asarray(min_dt, dtype=accelerations.dtype),
+        jnp.asarray(max_dt, dtype=accelerations.dtype),
+    )
+
+
 @dataclass(frozen=True)
 class AarsethController:
-    """Global adaptive timestep controller for Hermite-4."""
+    """Global adaptive timestep controller for Hermite integrators."""
 
     eta: float = 0.02
     min_dt: float = 1.0e-8
     max_dt: float = 1.0e-1
 
-    def suggest_dt(self, state: NBodyState) -> jnp.ndarray:
-        """Propose the next global timestep from the current state."""
+    def suggest_dt(self, state: NBodyState, *, order: int = 4) -> jnp.ndarray:
+        """Propose the next global timestep from the current state.
+
+        Hermite-6 uses the higher-derivative Aarseth form when ``snap`` and
+        ``crackle`` are available. Lower-order or partially initialized states
+        fall back to the jerk-based criterion.
+        """
         jerk = state.derivs.jerk
         if jerk is None:
             raise ValueError("AarsethController requires jerk in the state cache")
+        snap = state.derivs.snap
+        crackle = state.derivs.crackle
+        if order >= 6 and snap is not None and crackle is not None:
+            return aarseth_timestep_6th_order(
+                state.derivs.acc,
+                jerk,
+                snap,
+                crackle,
+                eta=self.eta,
+                min_dt=self.min_dt,
+                max_dt=self.max_dt,
+            )
         return aarseth_timestep(
             state.derivs.acc,
             jerk,

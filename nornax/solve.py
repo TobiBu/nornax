@@ -160,7 +160,7 @@ def _solve_adaptive_with_diffrax(
     state = _stabilize_state_for_solver(state, max_order=max_order)
     t0 = jnp.asarray(time, dtype=state.time.dtype)
     t1 = jnp.asarray(t_final, dtype=state.time.dtype)
-    dt0 = controller.suggest_dt(state)
+    dt0 = controller.suggest_dt(state, order=2 * max_order)
 
     step_budget = max(
         int(jnp.ceil((float(t1) - float(t0)) / controller.min_dt)) + 1,
