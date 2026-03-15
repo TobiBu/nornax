@@ -70,6 +70,39 @@ Examples:
 - [examples/two_body_diffrax.py](examples/two_body_diffrax.py): adaptive two-body solve
 - [examples/compare_hermite_orders.py](examples/compare_hermite_orders.py): compare Hermite-4/6/8 energy and angular-momentum drift
 
+## Jaccpot Adapter
+
+`nornax` now includes a first adapter for `jaccpot` via `JaccpotForceModel`.
+This is useful today for Hermite-4, because the current `jaccpot` runtime
+exposes acceleration and jerk, but not higher time derivatives.
+
+```python
+import jax.numpy as jnp
+
+from jaccpot import FastMultipoleMethod
+from nornax import AarsethController, JaccpotForceModel, solve_adaptive_to_time
+
+solver = FastMultipoleMethod(preset="fast", basis="solidfmm")
+force_model = JaccpotForceModel(solver)
+
+result = solve_adaptive_to_time(
+    jnp.asarray([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]),
+    jnp.asarray([[0.0, 0.2, 0.0], [0.0, -0.2, 0.0]]),
+    jnp.asarray([1.0, 1.0]),
+    force_model,
+    t_final=0.1,
+    order=4,
+    controller=AarsethController(eta=0.03, min_dt=1.0e-4, max_dt=5.0e-2),
+    atol=1.0e-6,
+    args={"leaf_size": 8, "max_order": 2, "jerk_mode": "fast_approx"},
+)
+```
+
+Current limitation:
+
+- use `JaccpotForceModel` with Hermite-4 for now
+- Hermite-6 and Hermite-8 still require higher time derivatives than `jaccpot` currently provides
+
 ## Planned Architecture
 
 - `nornax.state`: particle state and cached force derivatives
