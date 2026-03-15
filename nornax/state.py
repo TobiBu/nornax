@@ -11,7 +11,8 @@ class ForceDerivatives(NamedTuple):
     """Cached time derivatives of the acceleration field.
 
     The derivative ladder is designed to scale from Hermite-4 (acceleration and
-    jerk) up to higher-order Hermite methods that require snap and crackle.
+    jerk) up to higher-order Hermite methods that require snap, crackle, and
+    predictor-only higher derivatives reconstructed by Hermite interpolation.
     Unavailable higher derivatives are stored as ``None``.
     """
 
@@ -19,6 +20,8 @@ class ForceDerivatives(NamedTuple):
     jerk: jnp.ndarray | None = None
     snap: jnp.ndarray | None = None
     crackle: jnp.ndarray | None = None
+    pop: jnp.ndarray | None = None
+    d5: jnp.ndarray | None = None
 
 
 class NBodyState(NamedTuple):
