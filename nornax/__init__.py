@@ -1,6 +1,7 @@
 """Nornax: JAX-native Hermite integrators for N-body dynamics."""
 
 from ._typecheck import enable_runtime_typecheck
+from .adapters import JaccpotForceModel, JaccpotOptions
 from .controllers import AarsethController, AdaptiveStepPolicy
 from .diagnostics import (
     gravitational_potential_energy,
@@ -23,6 +24,8 @@ __all__ = [
     "AarsethController",
     "AdaptiveStepPolicy",
     "ForceDerivatives",
+    "JaccpotForceModel",
+    "JaccpotOptions",
     "NBodyState",
     "gravitational_potential_energy",
     "initialize_state",

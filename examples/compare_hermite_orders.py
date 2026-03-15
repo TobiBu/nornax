@@ -25,7 +25,9 @@ def main() -> None:
     masses = jnp.asarray([1.0, 1.0])
     controller = AarsethController(eta=0.02, min_dt=1.0e-4, max_dt=5.0e-2)
 
-    reference = initialize_state(positions, velocities, masses, force_model, max_order=4)
+    reference = initialize_state(
+        positions, velocities, masses, force_model, max_order=4
+    )
     e0 = float(total_energy(reference))
     l0 = total_angular_momentum(reference)
 
