@@ -1,26 +1,29 @@
 # Nornax Implementation Roadmap
 
-This repository has been reset around a standalone, JAX-native Hermite core.
+This repository now has a working standalone JAX/Diffrax Hermite stack through
+Hermite-8.
 
-## Week 1
+## Implemented
 
-- Define immutable `NBodyState` and `ForceDerivatives` containers
-- Implement backend-agnostic `ForceModel` protocol
-- Add standalone `DirectSumGravity` backend with acceleration and jerk
-- Implement pure `hermite4_step` predictor/corrector kernel
-- Add tests for force evaluation, state initialization, stepping, and basic convergence
+- immutable `NBodyState` / `ForceDerivatives` containers
+- backend-agnostic `ForceModel` protocol
+- `DirectSumGravity` with derivatives through `crackle`
+- standalone and Diffrax-backed Hermite-4, Hermite-6, and Hermite-8
+- adaptive global timestep control with order-aware criteria
+- generic public solve API via `solve_adaptive_to_time(..., order=4|6|8)`
+- diagnostics for total energy and angular momentum
+- convergence and long-run conservation validation
 
-## Week 2
+## Next
 
-- Repair local `diffrax` dependency compatibility
-- Replace the current guarded Diffrax scaffold with a tested custom solver path
-- Add `lax.scan` stepping helpers and benchmark scripts
-- Introduce a basic global adaptive timestep controller
+- add richer user-facing docs for scientific assumptions and solver selection
+- add more benchmarks comparing orders 4/6/8 on CPU and GPU
+- profile adaptive Hermite-8 on larger particle counts
+- decide how much standalone kernel API should remain public
 
-## Week 3+
+## Later
 
-- Add Hermite-6 using snap
-- Add Hermite-8 using crackle
-- Add long-run conservation and order-verification suites
-- Add a `jaccpot` adapter implementing the same `ForceModel` protocol
-- Benchmark direct-sum vs `jaccpot` backends on CPU and GPU
+- add a `jaccpot` adapter implementing the same `ForceModel` protocol
+- benchmark direct-sum vs `jaccpot` backends on CPU and GPU
+- explore block/individual timestep machinery in the spirit of the Hermite literature
+- tighten long-run invariants and astrophysical benchmark coverage

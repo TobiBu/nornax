@@ -4,8 +4,8 @@
   <img src="./nornax.png" alt="nornax Logo" width="420" />
 </p>
 
-`nornax` is a fresh restart of a JAX-native Hermite integrator package for
-gravitational N-body dynamics.
+`nornax` is a JAX-native Hermite integrator package for gravitational N-body
+dynamics.
 
 The current direction is:
 
@@ -14,18 +14,17 @@ The current direction is:
 - GPU-efficient JAX kernels
 - clean backend adapters so `jaccpot` can plug in later
 
-## Current Week-1 Scope
+## Current Scope
 
-This repository now contains the first implementation scaffold for that restart:
+The current implementation includes:
 
-- immutable `NBodyState` and `ForceDerivatives` PyTrees
+- immutable `NBodyState` / `ForceDerivatives` PyTrees
 - backend-agnostic `ForceModel` protocol
 - standalone `DirectSumGravity` reference backend
-- pure Hermite-4 predictor/corrector step kernel
-- Diffrax-facing solver wrapper isolated behind an optional import
-
-Higher-order Hermite methods, adaptive/block timesteps, and a `jaccpot`
-backend adapter are planned but not implemented yet.
+- standalone and Diffrax-backed Hermite-4, Hermite-6, and Hermite-8
+- adaptive global timestep control through Diffrax
+- diagnostics for total energy and angular momentum
+- convergence and long-run conservation tests
 
 ## Installation
 
@@ -47,24 +46,29 @@ pip install -e ".[dev]"
 import jax
 import jax.numpy as jnp
 
-from nornax import initialize_state
+from nornax import AarsethController, solve_adaptive_to_time, total_energy
 from nornax.forces import DirectSumGravity
-from nornax.solvers import hermite4_step
 
 jax.config.update("jax_enable_x64", True)
 
-force_model = DirectSumGravity(G=1.0, softening=0.0)
-positions = jnp.asarray([[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
-velocities = jnp.asarray([[0.0, 0.2, 0.0], [0.0, -0.2, 0.0]])
-masses = jnp.asarray([1.0, 1.0])
-
-state = initialize_state(positions, velocities, masses, force_model)
-state = hermite4_step(state, jnp.asarray(1.0e-2), force_model)
-print(state.time, state.positions)
+force_model = DirectSumGravity()
+result = solve_adaptive_to_time(
+    jnp.asarray([[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+    jnp.asarray([[0.0, 0.5, 0.0], [0.0, -0.5, 0.0]]),
+    jnp.asarray([1.0, 1.0]),
+    force_model,
+    t_final=1.0,
+    order=8,
+    controller=AarsethController(eta=0.03, min_dt=1.0e-4, max_dt=5.0e-2),
+    atol=1.0e-8,
+)
+print(result.final_state.time, total_energy(result.final_state))
 ```
 
-See [examples/two_body_diffrax.py](examples/two_body_diffrax.py) for a small
-runnable script.
+Examples:
+
+- [examples/two_body_diffrax.py](examples/two_body_diffrax.py): adaptive two-body solve
+- [examples/compare_hermite_orders.py](examples/compare_hermite_orders.py): compare Hermite-4/6/8 energy and angular-momentum drift
 
 ## Planned Architecture
 
@@ -74,15 +78,23 @@ runnable script.
 - `nornax.terms`: thin Diffrax integration hooks
 
 The scientific target is the family of higher-order Hermite methods discussed
-by Nitadori, Iwasawa, and Makino, with `snap` and `crackle` support added in
-later milestones.
+by Nitadori, Iwasawa, and Makino. The current implementation follows that paper
+through Hermite-8, including direct derivatives through `crackle` and
+higher-order adaptive timestep criteria.
 
-## Diffrax Note
+## Validation
 
-The code is now organized for Diffrax-based custom solvers, and the project's
-global `nornax` development environment has a working `jax`/`diffrax` stack.
-The current Hermite-4 integration is still an early custom-solver path, but it
-now runs through a real `diffrax.diffeqsolve(...)` smoke test.
+The test suite currently covers:
+
+- direct-force derivatives through `crackle`
+- Hermite-4/6/8 kernel behavior
+- Diffrax custom solver smoke tests for 4/6/8
+- convergence checks for 4/6/8
+- adaptive public solve APIs
+- long-run two-body energy-drift ordering across 4/6/8
+
+Benchmarks and examples live in [bench/bench_direct_sum.py](bench/bench_direct_sum.py)
+and [examples/compare_hermite_orders.py](examples/compare_hermite_orders.py).
 
 ## Development
 
