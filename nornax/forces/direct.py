@@ -26,13 +26,13 @@ class DirectSumGravity:
         max_order: int,
         args: object = None,
     ) -> ForceDerivatives:
-        """Return acceleration and jerk for the current particle state."""
+        """Return acceleration derivatives for the current particle state."""
         del t, args
         if max_order < 1:
             raise ValueError("max_order must be >= 1")
-        if max_order > 2:
+        if max_order > 3:
             raise NotImplementedError(
-                "DirectSumGravity currently supports derivatives up to jerk"
+                "DirectSumGravity currently supports derivatives up to snap"
             )
 
         dr = positions[None, :, :] - positions[:, None, :]
@@ -61,7 +61,26 @@ class DirectSumGravity:
             * (dv * inv_r3[..., None] - 3.0 * rv[..., None] * dr * inv_r5[..., None])
         )
         jerk = jnp.sum(pair_jerk * inv_mask[..., None], axis=1)
-        return ForceDerivatives(acc=acc, jerk=jerk)
+
+        if max_order == 2:
+            return ForceDerivatives(acc=acc, jerk=jerk)
+
+        da = acc[None, :, :] - acc[:, None, :]
+        vv = jnp.sum(dv * dv, axis=-1)
+        ra = jnp.sum(dr * da, axis=-1)
+        inv_r7 = inv_r5 * inv_r**2
+        pair_snap = (
+            self.G
+            * mass_j[..., None]
+            * (
+                da * inv_r3[..., None]
+                - 6.0 * rv[..., None] * dv * inv_r5[..., None]
+                - 3.0 * (vv + ra)[..., None] * dr * inv_r5[..., None]
+                + 15.0 * (rv**2)[..., None] * dr * inv_r7[..., None]
+            )
+        )
+        snap = jnp.sum(pair_snap * inv_mask[..., None], axis=1)
+        return ForceDerivatives(acc=acc, jerk=jerk, snap=snap)
 
 
 def jax_lax_rsqrt(x: jnp.ndarray) -> jnp.ndarray:
