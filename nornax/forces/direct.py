@@ -30,9 +30,9 @@ class DirectSumGravity:
         del t, args
         if max_order < 1:
             raise ValueError("max_order must be >= 1")
-        if max_order > 3:
+        if max_order > 4:
             raise NotImplementedError(
-                "DirectSumGravity currently supports derivatives up to snap"
+                "DirectSumGravity currently supports derivatives up to crackle"
             )
 
         dr = positions[None, :, :] - positions[:, None, :]
@@ -80,7 +80,30 @@ class DirectSumGravity:
             )
         )
         snap = jnp.sum(pair_snap * inv_mask[..., None], axis=1)
-        return ForceDerivatives(acc=acc, jerk=jerk, snap=snap)
+        if max_order == 3:
+            return ForceDerivatives(acc=acc, jerk=jerk, snap=snap)
+
+        dj = jerk[None, :, :] - jerk[:, None, :]
+        va = jnp.sum(dv * da, axis=-1)
+        rj = jnp.sum(dr * dj, axis=-1)
+        beta = vv + ra
+        gamma = 3.0 * va + rj
+        inv_r9 = inv_r7 * inv_r**2
+        pair_crackle = (
+            self.G
+            * mass_j[..., None]
+            * (
+                dj * inv_r3[..., None]
+                - 9.0 * rv[..., None] * da * inv_r5[..., None]
+                - 9.0 * beta[..., None] * dv * inv_r5[..., None]
+                - 3.0 * gamma[..., None] * dr * inv_r5[..., None]
+                + 45.0 * (rv**2)[..., None] * dv * inv_r7[..., None]
+                + 45.0 * (rv * beta)[..., None] * dr * inv_r7[..., None]
+                - 105.0 * (rv**3)[..., None] * dr * inv_r9[..., None]
+            )
+        )
+        crackle = jnp.sum(pair_crackle * inv_mask[..., None], axis=1)
+        return ForceDerivatives(acc=acc, jerk=jerk, snap=snap, crackle=crackle)
 
 
 def jax_lax_rsqrt(x: jnp.ndarray) -> jnp.ndarray:
