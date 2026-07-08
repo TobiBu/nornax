@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 
+from nornax._typing import ScalarLike
 from nornax.forces.base import ForceModel
 from nornax.state import ForceDerivatives, NBodyState
 from nornax.terms import NBodyTerm
@@ -26,7 +27,7 @@ def _richardson_scale(order: int) -> float:
 
 def hermite8_step(
     state: NBodyState,
-    dt: jnp.ndarray,
+    dt: ScalarLike,
     force_model: ForceModel,
     *,
     args: object = None,
@@ -145,7 +146,7 @@ def hermite8_step(
 
 def hermite8_step_doubling_error(
     state: NBodyState,
-    dt: jnp.ndarray,
+    dt: ScalarLike,
     force_model: ForceModel,
     *,
     args: object = None,
@@ -203,7 +204,7 @@ def reconstruct_predictor_derivatives_end(
     jerk1: jnp.ndarray,
     snap1: jnp.ndarray,
     crackle1: jnp.ndarray,
-    dt: jnp.ndarray,
+    dt: ScalarLike,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Reconstruct pop and 5th derivative at the end of the step.
 

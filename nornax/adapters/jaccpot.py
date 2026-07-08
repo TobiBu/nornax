@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Any, Mapping
+from typing import Any
 
 import jax.numpy as jnp
 
+from nornax._typing import PerParticle, ScalarLike, Vec3
 from nornax.state import ForceDerivatives
 
 
@@ -54,10 +56,10 @@ class JaccpotForceModel:
 
     def derivatives(
         self,
-        t: jnp.ndarray,
-        positions: jnp.ndarray,
-        velocities: jnp.ndarray,
-        masses: jnp.ndarray,
+        t: ScalarLike,
+        positions: Vec3,
+        velocities: Vec3,
+        masses: PerParticle,
         *,
         max_order: int,
         args: object = None,

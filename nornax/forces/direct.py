@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import jax.numpy as jnp
+from jax import Array
+from jaxtyping import Float
 
+from nornax._typing import PerParticle, ScalarLike, Vec3
 from nornax.state import ForceDerivatives
 
 
@@ -18,10 +21,10 @@ class DirectSumGravity:
 
     def derivatives(
         self,
-        t: jnp.ndarray,
-        positions: jnp.ndarray,
-        velocities: jnp.ndarray,
-        masses: jnp.ndarray,
+        t: ScalarLike,
+        positions: Vec3,
+        velocities: Vec3,
+        masses: PerParticle,
         *,
         max_order: int,
         args: object = None,
@@ -106,6 +109,6 @@ class DirectSumGravity:
         return ForceDerivatives(acc=acc, jerk=jerk, snap=snap, crackle=crackle)
 
 
-def _reciprocal_sqrt(x: jnp.ndarray) -> jnp.ndarray:
+def _reciprocal_sqrt(x: Float[Array, "..."]) -> Float[Array, "..."]:
     """Return the elementwise reciprocal square root ``1 / sqrt(x)``."""
     return jnp.reciprocal(jnp.sqrt(x))

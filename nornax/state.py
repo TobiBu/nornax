@@ -6,6 +6,8 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from nornax._typing import PerParticle, Scalar, Vec3
+
 
 class ForceDerivatives(NamedTuple):
     """Cached time derivatives of the acceleration field.
@@ -16,23 +18,23 @@ class ForceDerivatives(NamedTuple):
     Unavailable higher derivatives are stored as ``None``.
     """
 
-    acc: jnp.ndarray
-    jerk: jnp.ndarray | None = None
-    snap: jnp.ndarray | None = None
-    crackle: jnp.ndarray | None = None
-    pop: jnp.ndarray | None = None
-    d5: jnp.ndarray | None = None
-    d6: jnp.ndarray | None = None
-    d7: jnp.ndarray | None = None
+    acc: Vec3
+    jerk: Vec3 | None = None
+    snap: Vec3 | None = None
+    crackle: Vec3 | None = None
+    pop: Vec3 | None = None
+    d5: Vec3 | None = None
+    d6: Vec3 | None = None
+    d7: Vec3 | None = None
 
 
 class NBodyState(NamedTuple):
     """Immutable JAX PyTree for particle data and cached derivatives."""
 
-    positions: jnp.ndarray
-    velocities: jnp.ndarray
-    masses: jnp.ndarray
-    time: jnp.ndarray
+    positions: Vec3
+    velocities: Vec3
+    masses: PerParticle
+    time: Scalar
     derivs: ForceDerivatives
 
     @property
@@ -40,7 +42,7 @@ class NBodyState(NamedTuple):
         """Return the number of particles."""
         return int(self.positions.shape[0])
 
-    def kinetic_energy(self) -> jnp.ndarray:
+    def kinetic_energy(self) -> Scalar:
         """Compute the total kinetic energy."""
         v2 = jnp.sum(self.velocities**2, axis=-1)
         return 0.5 * jnp.sum(self.masses * v2)

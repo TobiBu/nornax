@@ -8,6 +8,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from nornax._typing import ScalarLike
 from nornax.controllers.aarseth import AarsethController, AdaptiveStepPolicy
 from nornax.forces.base import ForceModel
 from nornax.state import NBodyState
@@ -80,7 +81,7 @@ def _state_difference(
 
 def hermite4_step(
     state: NBodyState,
-    dt: jnp.ndarray,
+    dt: ScalarLike,
     force_model: ForceModel,
     *,
     args: object = None,
@@ -168,7 +169,7 @@ def hermite4_adaptive_scan(
 
 def hermite4_step_doubling_error(
     state: NBodyState,
-    dt: jnp.ndarray,
+    dt: ScalarLike,
     force_model: ForceModel,
     *,
     args: object = None,
@@ -203,7 +204,7 @@ def hermite4_step_doubling_error(
 
 def hermite4_controlled_step(
     state: NBodyState,
-    dt: jnp.ndarray,
+    dt: ScalarLike,
     force_model: ForceModel,
     *,
     atol: float,

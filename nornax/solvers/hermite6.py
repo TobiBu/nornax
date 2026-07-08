@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 
+from nornax._typing import ScalarLike
 from nornax.forces.base import ForceModel
 from nornax.state import ForceDerivatives, NBodyState
 from nornax.terms import NBodyTerm
@@ -26,7 +27,7 @@ def _richardson_scale(order: int) -> float:
 
 def hermite6_step(
     state: NBodyState,
-    dt: jnp.ndarray,
+    dt: ScalarLike,
     force_model: ForceModel,
     *,
     args: object = None,
@@ -108,7 +109,7 @@ def hermite6_step(
 
 def hermite6_step_doubling_error(
     state: NBodyState,
-    dt: jnp.ndarray,
+    dt: ScalarLike,
     force_model: ForceModel,
     *,
     args: object = None,
@@ -160,7 +161,7 @@ def reconstruct_crackle_end(
     acc1: jnp.ndarray,
     jerk1: jnp.ndarray,
     snap1: jnp.ndarray,
-    dt: jnp.ndarray,
+    dt: ScalarLike,
 ) -> jnp.ndarray:
     """Reconstruct crackle at the end of the step from endpoint data.
 
