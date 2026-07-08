@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from nornax._typing import PerParticle, Vec3
 from nornax.forces.base import ForceModel
 from nornax.state import NBodyState
 
 
 def initialize_state(
-    positions: jnp.ndarray,
-    velocities: jnp.ndarray,
-    masses: jnp.ndarray,
+    positions: Vec3,
+    velocities: Vec3,
+    masses: PerParticle,
     force_model: ForceModel,
     *,
     time: float = 0.0,

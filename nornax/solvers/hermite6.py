@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 
+from nornax._typing import ScalarLike
 from nornax.forces.base import ForceModel
 from nornax.state import ForceDerivatives, NBodyState
 from nornax.terms import NBodyTerm
@@ -15,7 +16,7 @@ try:
 except Exception as exc:  # pragma: no cover - exercised only with incompatible envs
     dfx = None
     _DIFFRAX_IMPORT_ERROR = exc
-else:  # pragma: no cover - depends on external diffrax stack
+else:
     _DIFFRAX_IMPORT_ERROR = None
 
 
@@ -26,7 +27,7 @@ def _richardson_scale(order: int) -> float:
 
 def hermite6_step(
     state: NBodyState,
-    dt: jnp.ndarray,
+    dt: ScalarLike,
     force_model: ForceModel,
     *,
     args: object = None,
@@ -108,7 +109,7 @@ def hermite6_step(
 
 def hermite6_step_doubling_error(
     state: NBodyState,
-    dt: jnp.ndarray,
+    dt: ScalarLike,
     force_model: ForceModel,
     *,
     args: object = None,
@@ -123,37 +124,25 @@ def hermite6_step_doubling_error(
 
 
 def state_difference(a: NBodyState, b: NBodyState, *, scale: float = 1.0) -> NBodyState:
-    """Return a PyTree difference suitable for Diffrax error controllers."""
+    """Return a PyTree difference suitable for Diffrax error controllers.
+
+    Only position and velocity carry a meaningful local error. The acceleration
+    derivatives live on a different scale (and diverge near close encounters),
+    so we keep the PyTree structure but zero every non-kinematic leaf to avoid
+    distorting the single-tolerance PID step controller.
+    """
     scale = jnp.asarray(scale, dtype=a.positions.dtype)
-    jerk_a = a.derivs.jerk
-    jerk_b = b.derivs.jerk
-    snap_a = a.derivs.snap
-    snap_b = b.derivs.snap
-    crackle_a = a.derivs.crackle
-    crackle_b = b.derivs.crackle
     zeros = jnp.zeros_like(a.derivs.acc)
     return NBodyState(
         positions=scale * (a.positions - b.positions),
         velocities=scale * (a.velocities - b.velocities),
         masses=jnp.zeros_like(a.masses),
-        time=scale * (a.time - b.time),
+        time=jnp.zeros_like(a.time),
         derivs=ForceDerivatives(
-            acc=scale * (a.derivs.acc - b.derivs.acc),
-            jerk=(
-                scale * zeros
-                if jerk_a is None or jerk_b is None
-                else scale * (jerk_a - jerk_b)
-            ),
-            snap=(
-                scale * zeros
-                if snap_a is None or snap_b is None
-                else scale * (snap_a - snap_b)
-            ),
-            crackle=(
-                scale * zeros
-                if crackle_a is None or crackle_b is None
-                else scale * (crackle_a - crackle_b)
-            ),
+            acc=zeros,
+            jerk=zeros,
+            snap=zeros,
+            crackle=zeros,
         ),
     )
 
@@ -172,7 +161,7 @@ def reconstruct_crackle_end(
     acc1: jnp.ndarray,
     jerk1: jnp.ndarray,
     snap1: jnp.ndarray,
-    dt: jnp.ndarray,
+    dt: ScalarLike,
 ) -> jnp.ndarray:
     """Reconstruct crackle at the end of the step from endpoint data.
 
@@ -192,7 +181,7 @@ def reconstruct_crackle_end(
     return a3_half + h * a4_half + 0.5 * h**2 * a5_half
 
 
-if dfx is not None:  # pragma: no cover - depends on external diffrax stack
+if dfx is not None:
 
     @dataclass
     class Hermite6(dfx.AbstractSolver):

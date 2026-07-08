@@ -63,9 +63,13 @@ def solve_adaptive_hermite4(
 ) -> AdaptiveSolveResult:
     """Initialize and run a fixed-count adaptive Hermite-4 rollout.
 
-    This helper preserves the fixed-count public API, but now aligns its solve
-    path with the Diffrax-backed adaptive flow by using the standalone scan only
-    to estimate the target integration horizon implied by ``n_steps``.
+    This runs exactly ``n_steps`` accepted global Hermite-4 steps with
+    Aarseth timestep selection through a single ``jax.lax.scan`` and does not
+    depend on Diffrax. Unlike the ``*_to_time`` helpers it performs no
+    step-doubling error control; fixing both the step count and a tolerance is
+    over-determined, so this path is meant for lightweight previews and
+    profiling. Use ``solve_adaptive_hermite4_to_time`` when you need an
+    error-controlled solve to a target time.
     """
     controller = controller or AarsethController()
     state = initialize_state(
@@ -77,28 +81,12 @@ def solve_adaptive_hermite4(
         max_order=2,
         args=args,
     )
-    preview = hermite4_adaptive_scan(
+    return hermite4_adaptive_scan(
         state,
         force_model,
         controller,
         n_steps=n_steps,
         args=args,
-    )
-    result = solve_adaptive_hermite4_to_time(
-        positions,
-        velocities,
-        masses,
-        force_model,
-        t_final=float(preview.final_state.time),
-        controller=controller,
-        atol=1.0e-5,
-        time=time,
-        args=args,
-    )
-    return AdaptiveSolveResult(
-        final_state=result.final_state,
-        dt_history=result.dt_history[:n_steps],
-        next_dt=result.next_dt,
     )
 
 
