@@ -7,7 +7,7 @@ name = "nornax"
 version = "0.0.1"
 description = "JAX-native Hermite integrators for N-body dynamics with Diffrax-facing solver hooks"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 authors = [
   { name = "AstroAI Lab", email = "astroai@iwr.uni-heidelberg.de" },
@@ -19,9 +19,9 @@ classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
@@ -63,7 +63,7 @@ nornax = ["py.typed"]
 
 [tool.black]
 line-length = 88
-target-version = ["py310", "py311", "py312"]
+target-version = ["py311", "py312", "py313"]
 include = "\\.pyi?$"
 exclude = '''
 /(
