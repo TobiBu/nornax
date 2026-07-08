@@ -14,11 +14,11 @@ try:
 except Exception as exc:  # pragma: no cover - exercised only with incompatible envs
     dfx = None
     _DIFFRAX_IMPORT_ERROR = exc
-else:  # pragma: no cover - depends on external diffrax stack
+else:
     _DIFFRAX_IMPORT_ERROR = None
 
 
-if dfx is not None:  # pragma: no cover - depends on external diffrax stack
+if dfx is not None:
 
     @dataclass
     class NBodyTerm(dfx.AbstractTerm):

@@ -18,7 +18,7 @@ try:
 except Exception as exc:  # pragma: no cover - exercised only with incompatible envs
     dfx = None
     _DIFFRAX_IMPORT_ERROR = exc
-else:  # pragma: no cover - depends on external diffrax stack
+else:
     _DIFFRAX_IMPORT_ERROR = None
 
 
@@ -52,22 +52,26 @@ def _richardson_scale(order: int) -> float:
 def _state_difference(
     a: NBodyState, b: NBodyState, *, scale: float = 1.0
 ) -> NBodyState:
-    """Return a PyTree difference suitable for Diffrax error controllers."""
+    """Return a PyTree difference suitable for Diffrax error controllers.
+
+    Only the position and velocity leaves carry a physically meaningful local
+    error. The cached acceleration derivatives live on a different scale (and
+    blow up near close encounters), so feeding them into the single-tolerance
+    PID norm would distort step control. We keep the PyTree structure identical
+    to the solver state but zero every non-kinematic leaf.
+    """
     scale = jnp.asarray(scale, dtype=a.positions.dtype)
     jerk_a = a.derivs.jerk
     jerk_b = b.derivs.jerk
-    if jerk_a is None or jerk_b is None:
-        jerk_diff = None
-    else:
-        jerk_diff = scale * (jerk_a - jerk_b)
+    jerk_zero = None if jerk_a is None or jerk_b is None else jnp.zeros_like(jerk_a)
     return NBodyState(
         positions=scale * (a.positions - b.positions),
         velocities=scale * (a.velocities - b.velocities),
         masses=jnp.zeros_like(a.masses),
-        time=scale * (a.time - b.time),
+        time=jnp.zeros_like(a.time),
         derivs=type(a.derivs)(
-            acc=scale * (a.derivs.acc - b.derivs.acc),
-            jerk=jerk_diff,
+            acc=jnp.zeros_like(a.derivs.acc),
+            jerk=jerk_zero,
             snap=None,
             crackle=None,
         ),
@@ -286,7 +290,7 @@ def hermite4_adaptive_solve(
     )
 
 
-if dfx is not None:  # pragma: no cover - depends on external diffrax stack
+if dfx is not None:
 
     @dataclass
     class Hermite4(dfx.AbstractSolver):

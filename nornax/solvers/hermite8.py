@@ -15,7 +15,7 @@ try:
 except Exception as exc:  # pragma: no cover - exercised only with incompatible envs
     dfx = None
     _DIFFRAX_IMPORT_ERROR = exc
-else:  # pragma: no cover - depends on external diffrax stack
+else:
     _DIFFRAX_IMPORT_ERROR = None
 
 
@@ -160,29 +160,29 @@ def hermite8_step_doubling_error(
 
 
 def state_difference(a: NBodyState, b: NBodyState, *, scale: float = 1.0) -> NBodyState:
-    """Return a PyTree difference suitable for Diffrax error controllers."""
+    """Return a PyTree difference suitable for Diffrax error controllers.
+
+    Only position and velocity carry a meaningful local error. The acceleration
+    derivatives live on a different scale (and diverge near close encounters),
+    so we keep the PyTree structure but zero every non-kinematic leaf to avoid
+    distorting the single-tolerance PID step controller.
+    """
     scale = jnp.asarray(scale, dtype=a.positions.dtype)
     zeros = jnp.zeros_like(a.derivs.acc)
-
-    def diff_or_zero(lhs, rhs):
-        if lhs is None or rhs is None:
-            return scale * zeros
-        return scale * (lhs - rhs)
-
     return NBodyState(
         positions=scale * (a.positions - b.positions),
         velocities=scale * (a.velocities - b.velocities),
         masses=jnp.zeros_like(a.masses),
-        time=scale * (a.time - b.time),
+        time=jnp.zeros_like(a.time),
         derivs=ForceDerivatives(
-            acc=scale * (a.derivs.acc - b.derivs.acc),
-            jerk=diff_or_zero(a.derivs.jerk, b.derivs.jerk),
-            snap=diff_or_zero(a.derivs.snap, b.derivs.snap),
-            crackle=diff_or_zero(a.derivs.crackle, b.derivs.crackle),
-            pop=diff_or_zero(a.derivs.pop, b.derivs.pop),
-            d5=diff_or_zero(a.derivs.d5, b.derivs.d5),
-            d6=diff_or_zero(a.derivs.d6, b.derivs.d6),
-            d7=diff_or_zero(a.derivs.d7, b.derivs.d7),
+            acc=zeros,
+            jerk=zeros,
+            snap=zeros,
+            crackle=zeros,
+            pop=zeros,
+            d5=zeros,
+            d6=zeros,
+            d7=zeros,
         ),
     )
 
@@ -240,7 +240,7 @@ def reconstruct_predictor_derivatives_end(
     return pop_end, d5_end, d6_end, d7_end
 
 
-if dfx is not None:  # pragma: no cover - depends on external diffrax stack
+if dfx is not None:
 
     @dataclass
     class Hermite8(dfx.AbstractSolver):

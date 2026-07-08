@@ -25,11 +25,14 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
+  # jaxlib must track jax: mismatched lower bounds let a resolver pull an
+  # ancient jaxlib against a modern jax, which breaks the jaxtyping/equinox
+  # metaclass machinery at import time.
   "jax>=0.8.0",
-  "jaxlib>=0.4.0",
+  "jaxlib>=0.8.0",
   "diffrax>=0.6.0",
-  "equinox>=0.11.0",
-  "jaxtyping>=0.2.23",
+  "equinox>=0.11.10",
+  "jaxtyping>=0.2.34",
   "beartype>=0.14.0",
 ]
 
