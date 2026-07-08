@@ -43,7 +43,7 @@ class DirectSumGravity:
 
         r2 = jnp.sum(dr * dr, axis=-1) + self.softening**2
         r2 = jnp.where(inv_mask > 0.0, r2, 1.0)
-        inv_r = jnp.where(inv_mask > 0.0, jax_lax_rsqrt(r2), 0.0)
+        inv_r = jnp.where(inv_mask > 0.0, _reciprocal_sqrt(r2), 0.0)
         inv_r3 = inv_r**3
 
         mass_j = masses[None, :]
@@ -106,6 +106,6 @@ class DirectSumGravity:
         return ForceDerivatives(acc=acc, jerk=jerk, snap=snap, crackle=crackle)
 
 
-def jax_lax_rsqrt(x: jnp.ndarray) -> jnp.ndarray:
-    """Use the JAX-friendly reciprocal square root primitive."""
+def _reciprocal_sqrt(x: jnp.ndarray) -> jnp.ndarray:
+    """Return the elementwise reciprocal square root ``1 / sqrt(x)``."""
     return jnp.reciprocal(jnp.sqrt(x))

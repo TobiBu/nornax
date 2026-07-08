@@ -12,12 +12,19 @@ from nornax.state import ForceDerivatives
 
 @dataclass(frozen=True)
 class JaccpotOptions:
-    """Execution options forwarded to ``jaccpot`` runtime calls."""
+    """Execution options forwarded to ``jaccpot`` runtime calls.
+
+    Note that ``max_order`` here is the *FMM multipole expansion order* passed
+    to the ``jaccpot`` solver. It is unrelated to the ``max_order`` argument of
+    :meth:`ForceModel.derivatives`, which selects how many *time* derivatives of
+    the acceleration (jerk, snap, ...) the Hermite solver requests. The name is
+    kept to match the ``jaccpot`` runtime kwarg it maps onto.
+    """
 
     target_indices: jnp.ndarray | None = None
     bounds: tuple[jnp.ndarray, jnp.ndarray] | None = None
     leaf_size: int = 16
-    max_order: int = 2
+    max_order: int = 2  # FMM expansion order (see class docstring)
     theta: float | None = None
     jit_tree: bool | None = None
     refine_local: bool | None = None
