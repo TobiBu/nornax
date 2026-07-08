@@ -36,14 +36,8 @@ jobs:
       - name: isort
         run: isort --check-only .
 
-      - name: pydoclint (public API surface)
-        run: |
-          pydoclint \
-            nornax/__init__.py \
-            nornax/initialize.py \
-            nornax/state.py \
-            nornax/forces/base.py \
-            nornax/forces/direct.py
+      - name: pydoclint (full package)
+        run: pydoclint nornax/
 
       - name: Unit tests with coverage
         run: pytest
