@@ -20,9 +20,10 @@ The current implementation includes:
 
 - immutable `NBodyState` / `ForceDerivatives` PyTrees
 - backend-agnostic `ForceModel` protocol
-- standalone `DirectSumGravity` reference backend (O(N^2) all-pairs; it
-  materializes N×N pair tensors, so it is a correctness reference rather than
-  the large-N path — `jaccpot` is the scalable backend)
+- standalone `DirectSumGravity` reference backend (O(N^2) all-pairs; the
+  default path materializes N×N pair tensors, and an opt-in `block_size`
+  caps peak memory at O(block_size × N) for larger N — `jaccpot` remains the
+  scalable backend)
 - standalone and Diffrax-backed Hermite-4, Hermite-6, and Hermite-8
 - adaptive global timestep control through Diffrax
 - diagnostics for total energy and angular momentum
