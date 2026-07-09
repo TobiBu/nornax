@@ -83,9 +83,10 @@ Notebooks:
 
 ## Jaccpot Adapter
 
-`nornax` now includes a first adapter for `jaccpot` via `JaccpotForceModel`.
-This is useful today for Hermite-4, because the current `jaccpot` runtime
-exposes acceleration and jerk, but not higher time derivatives.
+`nornax` includes a `jaccpot` adapter via `JaccpotForceModel`. It supports
+Hermite-4, -6, and -8: acceleration and jerk come from the `jaccpot` jerk
+kernel, while snap and crackle (needed for Hermite-6/8) come from the solver's
+`compute_accelerations_with_time_derivatives` "accurate" mode.
 
 ```python
 import jax.numpy as jnp
@@ -102,17 +103,21 @@ result = solve_adaptive_to_time(
     jnp.asarray([1.0, 1.0]),
     force_model,
     t_final=0.1,
-    order=4,
+    order=8,
     controller=AarsethController(eta=0.03, min_dt=1.0e-4, max_dt=5.0e-2),
     atol=1.0e-6,
-    args={"leaf_size": 8, "max_order": 2, "jerk_mode": "fast_approx"},
+    args={"leaf_size": 8, "max_order": 4},
 )
 ```
 
-Current limitation:
+Notes:
 
-- use `JaccpotForceModel` with Hermite-4 for now
-- Hermite-6 and Hermite-8 still require higher time derivatives than `jaccpot` currently provides
+- for Hermite-4 (`order=4`), the adapter uses the `jaccpot` jerk kernel and the
+  `jerk_mode` / `jerk_fd_dt` options apply
+- for Hermite-6/8 (`order=6|8`), it uses the higher time-derivative kernel; use
+  a `jaccpot` FMM expansion `max_order` high enough for accurate snap/crackle
+- `jaccpot` provides time derivatives up to crackle, so Hermite-8 is the
+  highest order the adapter supports
 
 ## Planned Architecture
 
