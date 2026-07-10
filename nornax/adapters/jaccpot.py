@@ -46,13 +46,22 @@ class JaccpotOptions:
 class JaccpotForceModel:
     """Thin adapter exposing a ``jaccpot`` solver via the Nornax protocol.
 
-    Current `jaccpot` support covers acceleration and jerk only, so this
-    adapter is suitable for Hermite-4 today. Requests for higher time
-    derivatives raise ``NotImplementedError``.
+    The adapter maps the Nornax derivative ladder onto the ``jaccpot`` runtime:
+
+    - ``max_order=1`` -> ``compute_accelerations`` (acceleration only)
+    - ``max_order=2`` -> ``compute_accelerations_and_jerk`` (Hermite-4)
+    - ``max_order in (3, 4)`` -> ``compute_accelerations_with_time_derivatives``
+      for snap (Hermite-6) and crackle (Hermite-8)
+
+    ``jaccpot`` provides time derivatives up to crackle, so ``max_order`` above
+    4 raises ``NotImplementedError``. The higher-order path uses the solver's
+    ``"accurate"`` time-derivative mode.
     """
 
     solver: Any
     options: JaccpotOptions = JaccpotOptions()
+
+    _TIME_DERIVATIVE_MODE = "accurate"
 
     def derivatives(
         self,
@@ -69,25 +78,45 @@ class JaccpotForceModel:
         runtime_kwargs = self._resolve_runtime_kwargs(args)
         if max_order < 1:
             raise ValueError("max_order must be >= 1")
-        if max_order > 2:
+        if max_order > 4:
             raise NotImplementedError(
-                "jaccpot currently exposes time derivatives only through jerk; "
-                "use this adapter with Hermite-4 for now"
+                "jaccpot exposes acceleration time derivatives up to crackle "
+                "(max_order=4); higher orders are not available"
             )
         if max_order == 1:
             accelerations = self.solver.compute_accelerations(
                 positions,
                 masses,
-                **self._acceleration_kwargs(runtime_kwargs),
+                **self._drop_jerk_options(runtime_kwargs),
             )
             return ForceDerivatives(acc=accelerations)
-        accelerations, jerk = self.solver.compute_accelerations_and_jerk(
-            positions,
-            masses,
-            velocities,
-            **runtime_kwargs,
+        if max_order == 2:
+            accelerations, jerk = self.solver.compute_accelerations_and_jerk(
+                positions,
+                masses,
+                velocities,
+                **runtime_kwargs,
+            )
+            return ForceDerivatives(acc=accelerations, jerk=jerk)
+
+        # Hermite-6/8: request time derivatives through snap/crackle. jaccpot
+        # returns (acc, (D_t a, D_t^2 a, ...)), i.e. (jerk, snap, crackle).
+        accelerations, time_derivs = (
+            self.solver.compute_accelerations_with_time_derivatives(
+                positions,
+                masses,
+                velocities,
+                max_time_derivative_order=max_order - 1,
+                mode=self._TIME_DERIVATIVE_MODE,
+                **self._drop_jerk_options(runtime_kwargs),
+            )
         )
-        return ForceDerivatives(acc=accelerations, jerk=jerk)
+        return ForceDerivatives(
+            acc=accelerations,
+            jerk=time_derivs[0],
+            snap=time_derivs[1],
+            crackle=time_derivs[2] if max_order == 4 else None,
+        )
 
     def _resolve_runtime_kwargs(self, args: object) -> dict[str, Any]:
         """Merge default adapter options with per-call overrides."""
@@ -107,8 +136,13 @@ class JaccpotForceModel:
         )
 
     @staticmethod
-    def _acceleration_kwargs(runtime_kwargs: Mapping[str, Any]) -> dict[str, Any]:
-        """Drop jerk-only options for acceleration-only calls."""
+    def _drop_jerk_options(runtime_kwargs: Mapping[str, Any]) -> dict[str, Any]:
+        """Drop jerk-only options for calls that do not accept them.
+
+        ``jerk_mode`` and ``jerk_fd_dt`` are only valid for
+        ``compute_accelerations_and_jerk``; the acceleration-only and
+        time-derivative calls reject them.
+        """
         jerk_only = {"jerk_mode", "jerk_fd_dt"}
         return {
             key: value for key, value in runtime_kwargs.items() if key not in jerk_only

@@ -13,7 +13,7 @@ Hermite-8.
 - generic public solve API via `solve_adaptive_to_time(..., order=4|6|8)`
 - diagnostics for total energy and angular momentum
 - convergence and long-run conservation validation
-- `jaccpot` FMM adapter implementing the `ForceModel` protocol (Hermite-4)
+- `jaccpot` FMM adapter implementing the `ForceModel` protocol (Hermite-4/6/8)
 - memory-bounded direct-sum path via `DirectSumGravity(block_size=...)`
 
 ## Next
@@ -26,7 +26,7 @@ Hermite-8.
 ## Later
 
 - benchmark direct-sum vs `jaccpot` backends on CPU and GPU
-- extend the `jaccpot` adapter beyond Hermite-4 once it exposes snap/crackle
+- validate `jaccpot` Hermite-6/8 accuracy against direct-sum on real problems
 - tune/auto-select the direct-sum `block_size` from device memory
 - explore block/individual timestep machinery in the spirit of the Hermite literature
 - tighten long-run invariants and astrophysical benchmark coverage
