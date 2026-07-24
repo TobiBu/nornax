@@ -15,7 +15,7 @@ import jax.numpy as jnp
 
 from nornax._typing import IntPerParticle, PerParticle, ScalarLike, Vec3
 from nornax.blockstep.rungs import assign_rungs
-from nornax.blockstep.schedule import active_level_floor, is_sync_boundary, n_sub
+from nornax.blockstep.schedule import n_sub, stride
 from nornax.forces.base import MutualForceModel
 from nornax.state import BlockStepState
 
@@ -151,50 +151,63 @@ def advance_base_step(
     ``acc`` is the full acceleration at the end-of-step positions, ready to seed the
     next base step's rung assignment.
 
+    The ``n_sub + 1`` boundaries are walked with a ``lax.scan`` (the body traces
+    once) rather than a Python loop that unrolls ``2**k_max`` boundaries -- the
+    latter makes compile time grow like ``2**k_max``. Which levels are active at a
+    boundary is data-independent (``s`` divisible by ``stride_k = 2**(k_max - k)``),
+    so each level is guarded by a :func:`jax.lax.cond`: the ``k_max + 1`` conds are
+    traced once, but only the due levels' forces run at that boundary, preserving
+    the block-step work. The compiled graph is therefore ``O(k_max)`` force
+    evaluations instead of ``O(2**k_max)``.
+
     With ``checkpoint_substeps`` each boundary's kick (its force evaluations) is
     wrapped in :func:`jax.checkpoint`, so reverse-mode recomputes a boundary's
     accelerations instead of storing them. This bounds the per-base-step backward
     memory to a single boundary's pair tensors -- ``O(bucket x N)`` -- rather than
     the ``O(n_sub x bucket x N)`` of retaining all ``n_sub`` boundaries at once,
-    which is what lets deep ``k_max`` gradients fit. The default is ``False`` so
-    the forward arithmetic is bit-identical to the unwrapped loop.
+    which is what lets deep ``k_max`` gradients fit.
     """
     dt_max = jnp.asarray(dt_max, dtype=state.positions.dtype)
     ns = n_sub(k_max)
     dt_min = dt_max / ns
-
-    pos = state.positions
-    vel = state.velocities
     masses = state.masses
     rung = state.rung
-    end_acc = jnp.zeros_like(pos)
+    # stride_k in units of the smallest sub-step; level k is active at boundary s
+    # iff s % stride_k == 0 (this also captures both synchronized boundaries).
+    strides = tuple(stride(k, k_max) for k in range(k_max + 1))
 
-    for s in range(ns + 1):
-        floor_s = active_level_floor(s, k_max)
-        half = 0.5 if is_sync_boundary(s, k_max) else 1.0
-        want_acc = s == ns
+    def kick(pos, vel, end_acc, s, half, at_end):
+        """Apply the active levels' half/full kicks at boundary ``s``."""
+        for k in range(k_max + 1):
+            active = (s % strides[k]) == 0
 
-        # Kick at boundary s: the active levels' accelerations all read the same
-        # ``pos`` (velocity is not fed back within a boundary), so the running-vel
-        # accumulation below is bit-identical to a summed increment. Isolating it
-        # as a (pos, vel) -> (vel, acc) function lets jax.checkpoint remat it.
-        def kick(pos, vel, floor_s=floor_s, half=half, want_acc=want_acc):
-            acc_sum = jnp.zeros_like(pos)
-            for k in range(floor_s, k_max + 1):
+            def do(operands, k=k):
+                v, ea = operands
                 a_k = force.level_accelerations(
                     pos, masses, rung=rung, level=k, args=args
                 )
-                vel = vel + (half * dt_max / (1 << k)) * a_k
-                if want_acc:
-                    acc_sum = acc_sum + a_k
-            return vel, acc_sum
+                v = v + (half * dt_max / (1 << k)) * a_k
+                ea = jnp.where(at_end, ea + a_k, ea)  # full accel only at s == ns
+                return (v, ea)
 
-        kick_fn = jax.checkpoint(kick) if checkpoint_substeps else kick
-        vel, acc_sum = kick_fn(pos, vel)
-        if want_acc:
-            end_acc = acc_sum
-        if s < ns:
-            pos = pos + dt_min * vel
+            vel, end_acc = jax.lax.cond(active, do, lambda o: o, (vel, end_acc))
+        return vel, end_acc
+
+    kick_fn = jax.checkpoint(kick) if checkpoint_substeps else kick
+
+    def body(carry, s):
+        pos, vel, end_acc = carry
+        half = jnp.where((s == 0) | (s == ns), 0.5, 1.0).astype(pos.dtype)
+        at_end = s == ns
+        vel, end_acc = kick_fn(pos, vel, end_acc, s, half, at_end)
+        # Drift to the next boundary (a no-op after the final kick).
+        pos = pos + jnp.where(s < ns, dt_min, jnp.asarray(0.0, pos.dtype)) * vel
+        return (pos, vel, end_acc), None
+
+    init = (state.positions, state.velocities, jnp.zeros_like(state.positions))
+    (pos, vel, end_acc), _ = jax.lax.scan(
+        body, init, jnp.arange(ns + 1, dtype=jnp.int32)
+    )
 
     return BlockStepState(
         positions=pos,
