@@ -1,7 +1,7 @@
 """Evaluation suite for the block-power-of-two KDK leapfrog integrator.
 
-Measures, on a centrally-concentrated (Hernquist) initial condition -- the regime
-where individual timesteps pay off:
+Measures, on a Plummer or (more centrally-concentrated) Hernquist initial
+condition -- the regime where individual timesteps pay off:
 
 * speedup: fast (compacted) individual timesteps vs. (a) the masked full-N oracle
   and (b) a shared-min-dt baseline that pins every particle to the finest rung;
@@ -16,7 +16,7 @@ reproducible: seeded ICs, pinned dtype, and logged library versions.
 
 Example::
 
-    python bench/bench_leapfrog_kdk.py --n 8192 --k-max 4 --n-base 64
+    python bench/bench_leapfrog_kdk.py --ic plummer --n 8192 --k-max 4 --n-base 64
 """
 
 from __future__ import annotations
@@ -37,9 +37,9 @@ except Exception:  # pragma: no cover - CPU / no-GPU fallback
 import jax
 import jax.numpy as jnp
 
-from nornax import sample_hernquist_sphere
+from nornax import sample_hernquist_sphere, sample_plummer_sphere
 from nornax.blockstep.binning import choose_bucket, count_per_level
-from nornax.blockstep.rungs import assign_rungs
+from nornax.blockstep.rungs import acceleration_timestep, assign_rungs
 from nornax.diagnostics import total_linear_momentum
 from nornax.forces.mutual_direct import MutualDirectSumGravity
 from nornax.solvers.leapfrog_kdk import (
@@ -66,7 +66,11 @@ def _time(fn, *, repeats: int = 3) -> float:
 
 def _setup(args):
     """Build the IC, fix a rung assignment, and size per-level buckets."""
-    positions, velocities, masses = sample_hernquist_sphere(
+    sampler = {
+        "plummer": sample_plummer_sphere,
+        "hernquist": sample_hernquist_sphere,
+    }[args.ic]
+    positions, velocities, masses = sampler(
         jax.random.PRNGKey(args.seed), args.n, scale_radius=1.0
     )
     soft = args.softening
@@ -74,38 +78,51 @@ def _setup(args):
     acc0 = total_acceleration(
         ref, positions, masses, jnp.zeros(args.n, jnp.int32), k_max=0
     )
-    rung = assign_rungs(
-        acc0, dt_max=args.dt_max, k_max=args.k_max, eta=args.eta, eps=soft
-    )
+    # A meaningful rung spread needs dt_max near the coarsest particles' step, so
+    # the dense core climbs to finer rungs. If --dt-max is not set (<= 0), place it
+    # at the 90th percentile of the per-particle criterion timestep.
+    if args.dt_max > 0.0:
+        dt_max = args.dt_max
+    else:
+        dt_i = acceleration_timestep(acc0, eta=args.eta, eps=soft)
+        dt_max = float(jnp.percentile(dt_i, 90.0))
+    rung = assign_rungs(acc0, dt_max=dt_max, k_max=args.k_max, eta=args.eta, eps=soft)
     counts = count_per_level(rung, args.k_max)
     # Size each bucket up the power-of-two ladder with headroom for drift.
     buckets = tuple(choose_bucket(int(1.5 * c) + 1, floor=8, n=args.n) for c in counts)
-    return positions, velocities, masses, rung, counts, buckets, soft
+    return positions, velocities, masses, rung, counts, buckets, soft, dt_max
 
 
 def main() -> None:
     """Run the evaluation suite and print a reproducible report."""
     jax.config.update("jax_enable_x64", False)  # fp32 for the GPU throughput run
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ic", choices=("plummer", "hernquist"), default="plummer")
     parser.add_argument("--n", type=int, default=512)
     parser.add_argument("--k-max", type=int, default=3)
     parser.add_argument("--n-base", type=int, default=32)
-    parser.add_argument("--dt-max", type=float, default=0.02)
+    parser.add_argument(
+        "--dt-max",
+        type=float,
+        default=0.0,
+        help="base timestep; <= 0 auto-selects the 90th-percentile criterion step",
+    )
     parser.add_argument("--eta", type=float, default=0.1)
     parser.add_argument("--softening", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+
+    positions, velocities, masses, rung, counts, buckets, soft, dt_max = _setup(args)
 
     print("# nornax block-step KDK evaluation")
     print(f"platform      : {platform.platform()}")
     print(f"jax           : {jax.__version__}")
     print(f"devices       : {[d.platform for d in jax.devices()]}")
     print(
-        f"config        : n={args.n} k_max={args.k_max} n_base={args.n_base} "
-        f"dt_max={args.dt_max} eta={args.eta} softening={args.softening}"
+        f"config        : ic={args.ic} n={args.n} k_max={args.k_max} "
+        f"n_base={args.n_base} dt_max={dt_max:.4g} eta={args.eta} "
+        f"softening={args.softening}"
     )
-
-    positions, velocities, masses, rung, counts, buckets, soft = _setup(args)
     print(f"rung histogram: {counts}")
     print(f"buckets       : {buckets}")
 
@@ -120,7 +137,7 @@ def main() -> None:
             jax.jit(
                 lambda s: block_kdk_rollout(
                     s,
-                    args.dt_max,
+                    dt_max,
                     force,
                     k_max=args.k_max,
                     n_base=args.n_base,
@@ -162,7 +179,7 @@ def main() -> None:
         )
         final = block_kdk_rollout(
             state,
-            args.dt_max,
+            dt_max,
             fast,
             k_max=args.k_max,
             n_base=args.n_base,
