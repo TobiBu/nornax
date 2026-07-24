@@ -9,7 +9,7 @@ mismatch between, say, ``positions`` and ``masses`` is caught.
 from __future__ import annotations
 
 from jax import Array
-from jaxtyping import Float
+from jaxtyping import Float, Int
 
 # Per-particle 3-vector field: positions, velocities, and every acceleration
 # time derivative (jerk, snap, crackle, ...).
@@ -24,3 +24,9 @@ Scalar = Float[Array, ""]
 
 # A scalar accepted at an API boundary: either a 0-d array or a Python float.
 ScalarLike = Scalar | float
+
+# Per-particle integer field (e.g. block-step rung indices).
+IntPerParticle = Int[Array, "n"]
+
+# A 0-d integer array scalar (e.g. a base-step counter).
+IntScalar = Int[Array, ""]
