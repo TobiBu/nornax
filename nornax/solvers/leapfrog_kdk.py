@@ -134,6 +134,7 @@ def advance_base_step(
     *,
     k_max: int,
     args: object = None,
+    checkpoint_substeps: bool = False,
 ) -> BlockStepState:
     """Advance one base step of the block scheme with the rungs held fixed.
 
@@ -149,6 +150,14 @@ def advance_base_step(
     step, which is what makes the map symplectic and time-reversible. The returned
     ``acc`` is the full acceleration at the end-of-step positions, ready to seed the
     next base step's rung assignment.
+
+    With ``checkpoint_substeps`` each boundary's kick (its force evaluations) is
+    wrapped in :func:`jax.checkpoint`, so reverse-mode recomputes a boundary's
+    accelerations instead of storing them. This bounds the per-base-step backward
+    memory to a single boundary's pair tensors -- ``O(bucket x N)`` -- rather than
+    the ``O(n_sub x bucket x N)`` of retaining all ``n_sub`` boundaries at once,
+    which is what lets deep ``k_max`` gradients fit. The default is ``False`` so
+    the forward arithmetic is bit-identical to the unwrapped loop.
     """
     dt_max = jnp.asarray(dt_max, dtype=state.positions.dtype)
     ns = n_sub(k_max)
@@ -163,11 +172,27 @@ def advance_base_step(
     for s in range(ns + 1):
         floor_s = active_level_floor(s, k_max)
         half = 0.5 if is_sync_boundary(s, k_max) else 1.0
-        for k in range(floor_s, k_max + 1):
-            a_k = force.level_accelerations(pos, masses, rung=rung, level=k, args=args)
-            vel = vel + (half * dt_max / (1 << k)) * a_k
-            if s == ns:
-                end_acc = end_acc + a_k
+        want_acc = s == ns
+
+        # Kick at boundary s: the active levels' accelerations all read the same
+        # ``pos`` (velocity is not fed back within a boundary), so the running-vel
+        # accumulation below is bit-identical to a summed increment. Isolating it
+        # as a (pos, vel) -> (vel, acc) function lets jax.checkpoint remat it.
+        def kick(pos, vel, floor_s=floor_s, half=half, want_acc=want_acc):
+            acc_sum = jnp.zeros_like(pos)
+            for k in range(floor_s, k_max + 1):
+                a_k = force.level_accelerations(
+                    pos, masses, rung=rung, level=k, args=args
+                )
+                vel = vel + (half * dt_max / (1 << k)) * a_k
+                if want_acc:
+                    acc_sum = acc_sum + a_k
+            return vel, acc_sum
+
+        kick_fn = jax.checkpoint(kick) if checkpoint_substeps else kick
+        vel, acc_sum = kick_fn(pos, vel)
+        if want_acc:
+            end_acc = acc_sum
         if s < ns:
             pos = pos + dt_min * vel
 
@@ -190,6 +215,7 @@ def block_kdk_base_step(
     eta: float,
     eps: float,
     args: object = None,
+    checkpoint_substeps: bool = False,
 ) -> BlockStepState:
     """Reassign rungs at the synchronized boundary, then advance one base step.
 
@@ -200,7 +226,14 @@ def block_kdk_base_step(
     """
     target = assign_rungs(state.acc, dt_max=dt_max, k_max=k_max, eta=eta, eps=eps)
     state = state._replace(rung=target)
-    return advance_base_step(state, dt_max, force, k_max=k_max, args=args)
+    return advance_base_step(
+        state,
+        dt_max,
+        force,
+        k_max=k_max,
+        args=args,
+        checkpoint_substeps=checkpoint_substeps,
+    )
 
 
 def block_kdk_rollout(
@@ -215,15 +248,23 @@ def block_kdk_rollout(
     args: object = None,
     checkpoint: bool = True,
     reassign_rungs: bool = True,
+    checkpoint_substeps: bool = False,
 ) -> BlockStepState:
     """Roll out ``n_base`` block-step KDK base steps with a fixed-length ``lax.scan``.
 
     The step count is static, so the scan traces once and runs on device. With
     ``checkpoint`` (the default) each base step is wrapped in ``jax.checkpoint``:
-    only the base-step-boundary states are kept for the backward pass and the
-    sub-step interior is recomputed, bounding reverse-mode memory to ``O(n_base)``
-    boundary states. This is the ``RecursiveCheckpointAdjoint`` form of the discrete
-    adjoint through the symplectic map.
+    only the base-step-boundary states are kept for the backward pass and the base
+    step is recomputed, bounding the retained scan carries to ``O(n_base)`` boundary
+    states. This is the ``RecursiveCheckpointAdjoint`` form of the discrete adjoint
+    through the symplectic map.
+
+    ``checkpoint`` bounds memory *across* base steps but, on its own, still
+    materializes all ``n_sub = 2**k_max`` sub-step pair tensors while differentiating
+    a single base step. Add ``checkpoint_substeps`` to also remat each boundary's
+    kick, bounding the per-base-step backward memory to one boundary's tensors --
+    needed for deep ``k_max`` gradients, which otherwise OOM. It composes with
+    ``checkpoint`` and leaves the forward result unchanged.
 
     With ``reassign_rungs`` (the default) rungs are recomputed at each base-step
     boundary (production behavior); the assignment is severed from the gradient, so
@@ -237,9 +278,23 @@ def block_kdk_rollout(
     def base(carry: BlockStepState) -> BlockStepState:
         if reassign_rungs:
             return block_kdk_base_step(
-                carry, dt_max, force, k_max=k_max, eta=eta, eps=eps, args=args
+                carry,
+                dt_max,
+                force,
+                k_max=k_max,
+                eta=eta,
+                eps=eps,
+                args=args,
+                checkpoint_substeps=checkpoint_substeps,
             )
-        return advance_base_step(carry, dt_max, force, k_max=k_max, args=args)
+        return advance_base_step(
+            carry,
+            dt_max,
+            force,
+            k_max=k_max,
+            args=args,
+            checkpoint_substeps=checkpoint_substeps,
+        )
 
     step = jax.checkpoint(base) if checkpoint else base
 

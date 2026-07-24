@@ -97,6 +97,35 @@ def test_clustered_system_spans_multiple_rungs() -> None:
     assert int(jnp.max(rung)) > int(jnp.min(rung))
 
 
+def test_checkpoint_substeps_matches_forward_and_gradient() -> None:
+    """``checkpoint_substeps`` changes only the backward memory schedule.
+
+    The forward is bit-identical to the unwrapped kick loop, and the gradient of a
+    rollout summary is unchanged; only reverse-mode memory differs.
+    """
+    positions, velocities, masses = _clustered_system(seed=5)
+    force = MutualDirectSumGravity(softening=0.02)
+    state = initialize_block_state(positions, velocities, masses, force)
+    common = dict(k_max=3, n_base=40, eta=0.1, eps=0.02)
+
+    out_plain = block_kdk_rollout(state, 0.02, force, **common)
+    out_ckpt = block_kdk_rollout(state, 0.02, force, **common, checkpoint_substeps=True)
+    assert jnp.allclose(out_plain.positions, out_ckpt.positions, atol=1.0e-13)
+    assert jnp.allclose(out_plain.velocities, out_ckpt.velocities, atol=1.0e-13)
+    assert int(jnp.max(out_plain.rung)) > int(jnp.min(out_plain.rung))  # multi-rung
+
+    def summary(p, checkpoint_substeps):
+        s = initialize_block_state(p, velocities, masses, force)
+        out = block_kdk_rollout(
+            s, 0.02, force, **common, checkpoint_substeps=checkpoint_substeps
+        )
+        return jnp.sum(out.positions**2) + jnp.sum(out.velocities**2)
+
+    g_plain = jax.grad(lambda p: summary(p, False))(positions)
+    g_ckpt = jax.grad(lambda p: summary(p, True))(positions)
+    assert jnp.allclose(g_plain, g_ckpt, atol=1.0e-10)
+
+
 def test_multi_rung_rollout_conserves_linear_momentum() -> None:
     """Momentum is conserved to machine precision over a multi-rung rollout."""
     positions, velocities, masses = _clustered_system(seed=3)

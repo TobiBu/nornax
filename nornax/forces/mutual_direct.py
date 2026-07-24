@@ -31,11 +31,17 @@ class MutualDirectSumGravity:
     reference. Set ``buckets`` to a per-level tuple of power-of-two active-set
     capacities to select the compacted fast path (``buckets[k]`` bounds the number
     of rung-``k`` targets); it reproduces the oracle to floating-point tolerance.
+
+    ``block_size`` (fast path only) tiles the active-target axis so peak memory is
+    ``O(block_size x N)`` rather than ``O(max_bucket x N)``; leave it ``None`` for
+    the single-tile path. It changes only the memory schedule -- results and the
+    recompilation trace count are unchanged.
     """
 
     G: float = 1.0
     softening: float = 0.0
     buckets: tuple[int, ...] | None = None
+    block_size: int | None = None
 
     def level_accelerations(
         self,
@@ -60,6 +66,7 @@ class MutualDirectSumGravity:
             self.buckets[level],
             self.G,
             self.softening,
+            self.block_size,
         )
 
 

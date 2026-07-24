@@ -91,6 +91,30 @@ def test_fast_rollout_matches_oracle_rollout() -> None:
     assert jnp.allclose(p_o, p_f, atol=1.0e-11)
 
 
+def test_fast_tiled_matches_untiled_and_oracle() -> None:
+    """Tiling the active-target axis (block_size) reproduces the untiled fast path.
+
+    A non-power-of-two block also exercises padding of the final tile.
+    """
+    positions, masses, rung = _random_system(40, seed=7)
+    k_max = int(jnp.max(rung))
+    buckets = _tight_buckets(rung, k_max)
+
+    oracle = MutualDirectSumGravity(softening=0.05)
+    untiled = MutualDirectSumGravity(softening=0.05, buckets=buckets)
+    tiled = MutualDirectSumGravity(softening=0.05, buckets=buckets, block_size=3)
+
+    for k in range(k_max + 1):
+        a_o = oracle.level_accelerations(positions, masses, rung=rung, level=k)
+        a_u = untiled.level_accelerations(positions, masses, rung=rung, level=k)
+        a_t = tiled.level_accelerations(positions, masses, rung=rung, level=k)
+        assert jnp.allclose(a_t, a_u, atol=1.0e-12)
+        assert jnp.allclose(a_t, a_o, atol=1.0e-11)
+        assert jnp.allclose(
+            total_linear_momentum(masses, a_t), jnp.zeros(3), atol=1.0e-12
+        )
+
+
 def test_next_power_of_two_and_ladder() -> None:
     """Ladder helpers round up to powers of two and span floor..N."""
     assert next_power_of_two(1) == 1
