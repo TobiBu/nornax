@@ -14,7 +14,11 @@ from .diagnostics import (  # noqa: E402
     total_energy,
     total_linear_momentum,
 )
-from .forces import MutualDirectSumGravity, MutualForceModel  # noqa: E402
+from .forces import (  # noqa: E402
+    FusedMutualForceModel,
+    MutualDirectSumGravity,
+    MutualForceModel,
+)
 from .initial_conditions import (  # noqa: E402
     sample_hernquist_sphere,
     sample_plummer_sphere,
@@ -41,6 +45,7 @@ __all__ = [
     "AdaptiveStepPolicy",
     "BlockStepState",
     "ForceDerivatives",
+    "FusedMutualForceModel",
     "JaccpotForceModel",
     "JaccpotOptions",
     "MutualDirectSumGravity",

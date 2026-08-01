@@ -20,13 +20,20 @@ else:
 
 if dfx is not None:
 
-    @dataclass
     class NBodyTerm(dfx.AbstractTerm):
         """Diffrax term wrapper for N-body Hermite integration.
 
         The custom Hermite solver owns the actual force evaluation logic. This
         term exists so the solver can participate in Diffrax's validation and
         integration APIs while still exposing a sensible pointwise vector field.
+
+        Deliberately *not* decorated with ``@dataclass``: ``AbstractTerm`` is an
+        ``equinox.Module``, whose metaclass already turns every subclass into a
+        frozen dataclass. Under equinox < 0.13 the base is itself a frozen
+        dataclass, so a redundant non-frozen ``@dataclass`` here raises
+        ``TypeError: cannot inherit non-frozen dataclass from a frozen one`` at
+        *import* time -- which made nornax un-importable alongside pinned-older
+        stacks such as jaccpot's, and forced its cross-repo tests to skip.
         """
 
         force_model: ForceModel

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 
-from nornax._typing import IntPerParticle, PerParticle, Vec3
+from nornax._typing import IntPerParticle, PerParticle, ScalarLike, Vec3
 from nornax.blockstep.binning import fast_level_accelerations
 from nornax.forces.direct import _reciprocal_sqrt
 
@@ -36,12 +36,35 @@ class MutualDirectSumGravity:
     ``O(block_size x N)`` rather than ``O(max_bucket x N)``; leave it ``None`` for
     the single-tile path. It changes only the memory schedule -- results and the
     recompilation trace count are unchanged.
+
+    Setting ``k_max`` additionally satisfies
+    :class:`~nornax.forces.base.FusedMutualForceModel`, which lets the block-step
+    integrator drive the fused per-boundary path. For a direct sum fusion buys
+    nothing -- :meth:`boundary_kick` here *is* the per-level loop, spelled out to
+    define the semantics an FMM backend fuses for real -- but it puts both
+    backends on one integrator code path. ``k_max`` is unset by default so that a
+    model built for the per-level path never silently changes which path an
+    integrator takes.
     """
 
     G: float = 1.0
     softening: float = 0.0
     buckets: tuple[int, ...] | None = None
     block_size: int | None = None
+    k_max: int | None = None
+
+    def __post_init__(self) -> None:
+        """Reject a ``buckets`` tuple that does not cover levels ``0 .. k_max``.
+
+        Raises ``ValueError`` when ``buckets`` is too short for the declared
+        ``k_max``, rather than letting the fast path ``IndexError`` mid-step.
+        """
+        if self.buckets is not None and self.k_max is not None:
+            if len(self.buckets) < self.k_max + 1:
+                raise ValueError(
+                    f"buckets has {len(self.buckets)} entries but k_max="
+                    f"{self.k_max} needs {self.k_max + 1} (one per level)"
+                )
 
     def level_accelerations(
         self,
@@ -68,6 +91,83 @@ class MutualDirectSumGravity:
             self.softening,
             self.block_size,
         )
+
+    def total_accelerations(
+        self,
+        positions: Vec3,
+        masses: PerParticle,
+        *,
+        rung: IntPerParticle | None = None,
+        args: object = None,
+    ) -> Vec3:
+        """Return the full acceleration as the sum over levels ``0 .. k_max``.
+
+        Summed in ascending level order, so this is bit-identical to the
+        integrator's own per-level accumulation. With ``rung`` omitted every
+        particle is treated as rung 0, which puts every pair on level 0 and
+        collapses the sum to a single dense evaluation.
+
+        Raises ``ValueError`` when ``rung`` is given but ``k_max`` is unset, so
+        the level range of the sum would be undefined.
+        """
+        if rung is None:
+            zero = jnp.zeros(positions.shape[0], dtype=jnp.int32)
+            return self.level_accelerations(
+                positions, masses, rung=zero, level=0, args=args
+            )
+        if self.k_max is None:
+            raise ValueError(
+                "total_accelerations over a rung partition needs k_max; construct "
+                "MutualDirectSumGravity(k_max=...) to set the level range"
+            )
+        acc = self.level_accelerations(positions, masses, rung=rung, level=0, args=args)
+        for k in range(1, self.k_max + 1):
+            acc = acc + self.level_accelerations(
+                positions, masses, rung=rung, level=k, args=args
+            )
+        return acc
+
+    def boundary_kick(
+        self,
+        positions: Vec3,
+        velocities: Vec3,
+        masses: PerParticle,
+        *,
+        rung: IntPerParticle,
+        active_floor: int,
+        dt_max: ScalarLike,
+        half: float = 1.0,
+        args: object = None,
+    ) -> Vec3:
+        """Kick every level ``k >= active_floor`` by ``half * dt_max / 2**k``.
+
+        The reference implementation of the fused-boundary primitive: it defines
+        the semantics by *being* the per-level loop, level by level in ascending
+        order, so it reproduces the integrator's per-level path bit for bit. A
+        tree backend pushes the same weights into one traversal instead.
+
+        Momentum is untouched by the weighting -- each weight is one scalar
+        multiplying an already-antisymmetric per-pair force -- so
+        ``sum_i m_i (v' - v) == 0`` holds for the whole boundary. The return
+        value is the updated velocities.
+
+        Raises ``ValueError`` when ``k_max`` is unset, so the boundary's level
+        range would be undefined.
+        """
+        if self.k_max is None:
+            raise ValueError(
+                "boundary_kick needs k_max to know which levels the boundary "
+                "spans; construct MutualDirectSumGravity(k_max=...) to enable "
+                "the fused path"
+            )
+        dt = jnp.asarray(dt_max, dtype=positions.dtype)
+        vel = velocities
+        for k in range(int(active_floor), self.k_max + 1):
+            a_k = self.level_accelerations(
+                positions, masses, rung=rung, level=k, args=args
+            )
+            vel = vel + (half * dt / (1 << k)) * a_k
+        return vel
 
 
 def _oracle_level_accelerations(
