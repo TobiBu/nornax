@@ -15,9 +15,44 @@ import jax.numpy as jnp
 
 from nornax._typing import IntPerParticle, PerParticle, ScalarLike, Vec3
 from nornax.blockstep.rungs import assign_rungs
-from nornax.blockstep.schedule import n_sub, stride
-from nornax.forces.base import MutualForceModel
+from nornax.blockstep.schedule import (
+    active_level_floor,
+    is_sync_boundary,
+    n_sub,
+    stride,
+)
+from nornax.forces.base import FusedMutualForceModel, MutualForceModel
 from nornax.state import BlockStepState
+
+
+def fused_boundary_model(
+    force: MutualForceModel, k_max: int
+) -> FusedMutualForceModel | None:
+    """Return ``force`` if it can drive the fused per-boundary path, else ``None``.
+
+    A model opts in by satisfying :class:`~nornax.forces.base.FusedMutualForceModel`
+    *and* declaring the same ``k_max`` the integrator is being run at. A model that
+    reports ``k_max is None`` has not configured fusion and takes the per-level
+    path; a model that reports a *different* ``k_max`` is a misconfiguration --
+    its fused weights would span the wrong level range -- and raises rather than
+    silently degrading.
+
+    Returns the model itself when the fused path applies and ``None`` otherwise,
+    and raises ``ValueError`` when the model declares a ``k_max`` that disagrees
+    with the ``k_max`` the integrator is stepping.
+    """
+    if not isinstance(force, FusedMutualForceModel):
+        return None
+    model_k_max = getattr(force, "k_max", None)
+    if model_k_max is None:
+        return None
+    if int(model_k_max) != int(k_max):
+        raise ValueError(
+            f"force model declares k_max={int(model_k_max)} but the integrator is "
+            f"stepping k_max={int(k_max)}; the fused boundary kick would cover the "
+            "wrong level range"
+        )
+    return force
 
 
 def total_acceleration(
@@ -166,10 +201,31 @@ def advance_base_step(
     memory to a single boundary's pair tensors -- ``O(bucket x N)`` -- rather than
     the ``O(n_sub x bucket x N)`` of retaining all ``n_sub`` boundaries at once,
     which is what lets deep ``k_max`` gradients fit.
+
+    When ``force`` supports the fused-boundary primitive (see
+    :func:`fused_boundary_model`) each boundary's active levels are collapsed into
+    a single ``boundary_kick``, taking the step from ``sum_s (active levels at s)``
+    force evaluations to ``n_sub + 1``, plus one ``total_accelerations`` for the
+    end-of-step field. That final call is kept separate on purpose: a boundary kick
+    returns *weighted* levels, from which the unweighted total cannot be recovered,
+    and ``acc`` must keep meaning the full acceleration.
+
+    The fused path walks the boundaries with a Python loop, not the ``lax.scan``
+    above, because ``boundary_kick`` takes ``active_floor`` and ``half`` as static
+    values -- that is the cross-repo contract jaccpot's ``BlockStepFMM`` implements,
+    and it is what lets a backend bake the level weights into its traversal. So the
+    fused graph carries ``2**k_max`` boundary kicks where the per-level graph
+    carries ``k_max + 1`` guarded evaluations: fusion trades trace size for runtime
+    evaluations. That is the right trade for a tree backend, where one traversal per
+    boundary is the dominant cost, and the wrong one for a cheap direct sum -- which
+    is why fusion is opt-in. Lifting it to a scan needs ``boundary_kick`` to accept
+    a *traced* boundary index (level weights as an array rather than a static
+    tuple), which is a change on the backend side of the contract.
     """
     dt_max = jnp.asarray(dt_max, dtype=state.positions.dtype)
     ns = n_sub(k_max)
     dt_min = dt_max / ns
+    fused = fused_boundary_model(force, k_max)
     masses = state.masses
     rung = state.rung
     # stride_k in units of the smallest sub-step; level k is active at boundary s
@@ -204,10 +260,43 @@ def advance_base_step(
         pos = pos + jnp.where(s < ns, dt_min, jnp.asarray(0.0, pos.dtype)) * vel
         return (pos, vel, end_acc), None
 
-    init = (state.positions, state.velocities, jnp.zeros_like(state.positions))
-    (pos, vel, end_acc), _ = jax.lax.scan(
-        body, init, jnp.arange(ns + 1, dtype=jnp.int32)
-    )
+    if fused is not None:
+
+        def fused_kick(pos, vel, active_floor, half):
+            """Apply every level at or above ``active_floor`` in one fused call."""
+            return fused.boundary_kick(
+                pos,
+                vel,
+                masses,
+                rung=rung,
+                active_floor=active_floor,
+                dt_max=dt_max,
+                half=half,
+                args=args,
+            )
+
+        # active_floor and half are static by contract, hence static_argnums.
+        fused_kick_fn = (
+            jax.checkpoint(fused_kick, static_argnums=(2, 3))
+            if checkpoint_substeps
+            else fused_kick
+        )
+        pos, vel = state.positions, state.velocities
+        for s in range(ns + 1):
+            vel = fused_kick_fn(
+                pos,
+                vel,
+                active_level_floor(s, k_max),
+                0.5 if is_sync_boundary(s, k_max) else 1.0,
+            )
+            if s < ns:
+                pos = pos + dt_min * vel
+        end_acc = fused.total_accelerations(pos, masses, rung=rung, args=args)
+    else:
+        init = (state.positions, state.velocities, jnp.zeros_like(state.positions))
+        (pos, vel, end_acc), _ = jax.lax.scan(
+            body, init, jnp.arange(ns + 1, dtype=jnp.int32)
+        )
 
     return BlockStepState(
         positions=pos,
