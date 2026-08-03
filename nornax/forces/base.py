@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from nornax._typing import IntPerParticle, PerParticle, ScalarLike, Vec3
+from nornax._typing import IntPerParticle, PerLevel, PerParticle, ScalarLike, Vec3
 from nornax.state import ForceDerivatives
 
 
@@ -97,6 +97,14 @@ class FusedMutualForceModel(MutualForceModel, Protocol):
     the *model* -- the weights are baked into the evaluation -- so it must agree
     with the driving integrator's ``k_max``. A model may report ``None`` to mean
     "fusion not configured", in which case an integrator uses the per-level path.
+
+    A model may also set an optional ``traced_boundary_weights`` class attribute
+    to say outright whether :meth:`boundary_kick` honors a traced
+    ``level_weights`` vector -- ``True`` to let the integrator scan the
+    boundaries, ``False`` to keep them unrolled. It is deliberately *not* a
+    member of this protocol: adding a data member would make ``isinstance``
+    reject every backend that predates it. Absent the attribute the integrator
+    falls back to inspecting :meth:`boundary_kick`'s signature.
     """
 
     k_max: int
@@ -125,9 +133,10 @@ class FusedMutualForceModel(MutualForceModel, Protocol):
         masses: PerParticle,
         *,
         rung: IntPerParticle,
-        active_floor: int,
-        dt_max: ScalarLike,
+        active_floor: int | None = None,
+        dt_max: ScalarLike | None = None,
         half: float = 1.0,
+        level_weights: PerLevel | None = None,
         args: object = None,
     ) -> Vec3:
         """Apply one sub-step boundary's kick in a single evaluation.
@@ -149,4 +158,35 @@ class FusedMutualForceModel(MutualForceModel, Protocol):
         ``is_sync_boundary(s, k_max)`` decides. Both are static Python values.
         ``dt_max`` may be a traced scalar; a backend that needs a concrete value
         there gives up differentiability with respect to it.
+
+        ``level_weights`` is the alternative spelling of the same boundary: the
+        ``(k_max + 1,)`` vector of weights, one per level, supplied directly
+        instead of being derived from ``active_floor``/``half``/``dt_max``. When
+        it is given it **takes precedence** and the other three are ignored; a
+        row of :func:`~nornax.blockstep.schedule.boundary_weight_table` scaled by
+        ``dt_max`` is exactly what the static form would have produced.
+
+        This is the seam that lets an integrator drive the boundaries with a
+        ``lax.scan``: a *static* ``active_floor`` forces one traced boundary kick
+        per boundary, so the traced graph grows like ``2**k_max`` even though the
+        runtime cost is only ``n_sub + 1`` evaluations, whereas a weight *array*
+        can be indexed with a traced boundary index inside a scan body that
+        traces once. Note the flip side for a backend that prunes levels at trace
+        time (a direct sum): traced weights cannot skip an inactive level, so it
+        evaluates all ``k_max + 1`` of them per boundary and only the zero weight
+        makes them harmless. A backend for which that trade is wrong declines
+        traced weights (see ``traced_boundary_weights`` below) and keeps the
+        unrolled path.
+
+        Supporting ``level_weights`` is *optional*: a backend may implement the
+        static form alone and the integrator then unrolls the boundaries. Support
+        is detected by
+        :func:`~nornax.solvers.leapfrog_kdk.supports_traced_level_weights`, which
+        honors an explicit ``traced_boundary_weights`` class attribute
+        (``True``/``False``) and otherwise looks for a ``level_weights`` parameter
+        in this signature. Ignoring a ``level_weights`` that was passed would
+        integrate the wrong equations silently, so an implementation must either
+        honor it or not accept it -- which is also why the integrator passes
+        *only* ``level_weights`` on the scanned path, leaving no stale
+        ``active_floor`` to fall back on.
         """

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 
-from nornax._typing import IntPerParticle, PerParticle, ScalarLike, Vec3
+from nornax._typing import IntPerParticle, PerLevel, PerParticle, ScalarLike, Vec3
 from nornax.blockstep.binning import fast_level_accelerations
 from nornax.forces.direct import _reciprocal_sqrt
 
@@ -134,9 +134,10 @@ class MutualDirectSumGravity:
         masses: PerParticle,
         *,
         rung: IntPerParticle,
-        active_floor: int,
-        dt_max: ScalarLike,
+        active_floor: int | None = None,
+        dt_max: ScalarLike | None = None,
         half: float = 1.0,
+        level_weights: PerLevel | None = None,
         args: object = None,
     ) -> Vec3:
         """Kick every level ``k >= active_floor`` by ``half * dt_max / 2**k``.
@@ -146,13 +147,26 @@ class MutualDirectSumGravity:
         order, so it reproduces the integrator's per-level path bit for bit. A
         tree backend pushes the same weights into one traversal instead.
 
+        With ``level_weights`` the boundary's weights are taken from the given
+        ``(k_max + 1,)`` vector instead of being derived from
+        ``active_floor``/``half``/``dt_max``, which are then ignored -- the form
+        the integrator uses to walk the boundaries with a ``lax.scan``. The
+        weights may be traced, so no level can be dropped at trace time: all
+        ``k_max + 1`` levels are evaluated and an inactive one contributes
+        ``0.0 * a_k``, which leaves the velocities bit-unchanged. For this
+        backend that is pure extra runtime work (a fused traversal it is not);
+        it exists to define the semantics an FMM backend implements for real,
+        and to let one integrator path drive both.
+
         Momentum is untouched by the weighting -- each weight is one scalar
         multiplying an already-antisymmetric per-pair force -- so
         ``sum_i m_i (v' - v) == 0`` holds for the whole boundary. The return
         value is the updated velocities.
 
-        Raises ``ValueError`` when ``k_max`` is unset, so the boundary's level
-        range would be undefined.
+        Raises ``ValueError`` when ``k_max`` is unset (the boundary's level range
+        would be undefined), when neither ``level_weights`` nor
+        ``active_floor``/``dt_max`` is given, and when ``level_weights`` has the
+        wrong length for ``k_max``.
         """
         if self.k_max is None:
             raise ValueError(
@@ -160,13 +174,34 @@ class MutualDirectSumGravity:
                 "spans; construct MutualDirectSumGravity(k_max=...) to enable "
                 "the fused path"
             )
-        dt = jnp.asarray(dt_max, dtype=positions.dtype)
+        if level_weights is None:
+            if active_floor is None or dt_max is None:
+                raise ValueError(
+                    "boundary_kick needs either level_weights, or both "
+                    "active_floor and dt_max"
+                )
+            dt = jnp.asarray(dt_max, dtype=positions.dtype)
+            # A static floor drops the inactive levels from the trace entirely.
+            weights = {
+                k: half * dt / (1 << k)
+                for k in range(int(active_floor), self.k_max + 1)
+            }
+        else:
+            level_weights = jnp.asarray(level_weights, dtype=positions.dtype)
+            if level_weights.shape != (self.k_max + 1,):
+                raise ValueError(
+                    f"level_weights must be one weight per level, shape "
+                    f"({self.k_max + 1},) for k_max={self.k_max}; got shape "
+                    f"{tuple(level_weights.shape)}"
+                )
+            weights = {k: level_weights[k] for k in range(self.k_max + 1)}
+
         vel = velocities
-        for k in range(int(active_floor), self.k_max + 1):
+        for k in sorted(weights):  # ascending level order, as the per-level loop
             a_k = self.level_accelerations(
                 positions, masses, rung=rung, level=k, args=args
             )
-            vel = vel + (half * dt / (1 << k)) * a_k
+            vel = vel + weights[k] * a_k
         return vel
 
 

@@ -69,6 +69,41 @@ def base_step_boundaries(k_max: int) -> tuple[int, ...]:
     return tuple(range(n_sub(k_max) + 1))
 
 
+def boundary_level_weights(s: int, k_max: int) -> tuple[float, ...]:
+    """Return boundary ``s``'s per-level kick weights, in units of ``dt_max``.
+
+    Entry ``k`` is ``half / 2**k`` for an active level (``k >= active_level_floor``)
+    and ``0.0`` below the floor, with ``half = 0.5`` at the synchronized ends of
+    the base step and ``1.0`` inside. Multiplying by ``dt_max`` gives the weight
+    the boundary applies to level ``k``'s acceleration, i.e. exactly the
+    ``half * dt_max / 2**k`` of the per-level kick.
+
+    The weights are returned ``dt_max``-free so this module stays free of JAX
+    arrays and so the integrator can scale a *traced* ``dt_max`` in (which keeps
+    the step size differentiable). Nothing is given up by splitting the product
+    that way: ``half`` and ``1 / 2**k`` are powers of two, so scaling by them only
+    shifts an exponent and ``dt_max * (half / 2**k)`` is bit-identical to
+    ``half * dt_max / 2**k``.
+    """
+    floor = active_level_floor(s, k_max)
+    half = 0.5 if is_sync_boundary(s, k_max) else 1.0
+    return tuple(
+        (half / float(1 << k)) if k >= floor else 0.0 for k in range(k_max + 1)
+    )
+
+
+def boundary_weight_table(k_max: int) -> tuple[tuple[float, ...], ...]:
+    """Return every boundary's kick weights as an ``(n_sub + 1, k_max + 1)`` table.
+
+    Row ``s`` is :func:`boundary_level_weights` for boundary ``s``. Materializing
+    the whole schedule is what lets the integrator walk the boundaries with a
+    ``lax.scan``: the table is a compile-time constant (72 floats at
+    ``k_max = 3``) that can be indexed with a *traced* boundary index, so the
+    fused path needs one traced boundary kick instead of one per boundary.
+    """
+    return tuple(boundary_level_weights(s, k_max) for s in base_step_boundaries(k_max))
+
+
 def level_kick_weight(k: int, k_max: int) -> float:
     """Return the total kick weight a level-``k`` interaction receives per base step.
 

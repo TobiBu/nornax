@@ -18,6 +18,10 @@ Vec3 = Float[Array, "n 3"]
 # Per-particle scalar field (e.g. masses).
 PerParticle = Float[Array, "n"]
 
+# Per-interaction-level scalar field: one entry per block-step level 0 .. k_max
+# (e.g. a sub-step boundary's per-level kick weights).
+PerLevel = Float[Array, "levels"]
+
 # A 0-d array scalar (e.g. cached time). Python floats are accepted separately
 # at call boundaries via ``ScalarLike``.
 Scalar = Float[Array, ""]

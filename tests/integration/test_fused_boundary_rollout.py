@@ -3,7 +3,9 @@
 The unit suite pins the fused primitive against the per-level loop one boundary at
 a time. These tests check that the properties the integrator exists to provide --
 momentum conservation, bounded energy, differentiability -- survive a full rollout
-driven through ``boundary_kick`` rather than ``level_accelerations``.
+driven through ``boundary_kick`` rather than ``level_accelerations``, and that
+scanning the boundaries over a traced weight table leaves both the trajectory and
+its discrete adjoint where unrolling them put it.
 """
 
 from __future__ import annotations
@@ -25,6 +27,38 @@ _K_MAX = 2
 _DT_MAX = 0.02
 _ETA = 0.15
 _EPS = 0.2
+
+
+class _StaticWeightsOnly(MutualDirectSumGravity):
+    """Fused model implementing only the static form, so its boundaries unroll.
+
+    The parity reference for the scanned path: same arithmetic, driven through the
+    Python loop over static ``active_floor``/``half`` values instead of a
+    ``lax.scan`` over the weight table.
+    """
+
+    def boundary_kick(  # noqa: D102
+        self,
+        positions,
+        velocities,
+        masses,
+        *,
+        rung,
+        active_floor,
+        dt_max,
+        half=1.0,
+        args=None,
+    ):
+        return super().boundary_kick(
+            positions,
+            velocities,
+            masses,
+            rung=rung,
+            active_floor=active_floor,
+            dt_max=dt_max,
+            half=half,
+            args=args,
+        )
 
 
 def _clustered_system(n: int = 24, seed: int = 0):
@@ -68,6 +102,26 @@ def test_fused_rollout_matches_the_per_level_rollout() -> None:
     assert jnp.allclose(got.velocities, reference.velocities, rtol=0.0, atol=1.0e-14)
     assert jnp.array_equal(got.rung, reference.rung)
     # The rollout genuinely exercised more than one rung.
+    assert int(jnp.max(got.rung)) > int(jnp.min(got.rung))
+
+
+def test_scanned_fused_rollout_matches_the_unrolled_fused_rollout() -> None:
+    """Scanning the boundaries reproduces unrolling them over a whole rollout."""
+    soft = 0.05
+    k_max = 3
+    positions, velocities, masses = _clustered_system(seed=1)
+    scanned = MutualDirectSumGravity(softening=soft, k_max=k_max)
+    unrolled = _StaticWeightsOnly(softening=soft, k_max=k_max)
+
+    state = initialize_block_state(positions, velocities, masses, scanned, k_max=k_max)
+    common = dict(k_max=k_max, n_base=40, eta=0.1, eps=soft)
+
+    got = block_kdk_rollout(state, _DT_MAX, scanned, **common)
+    reference = block_kdk_rollout(state, _DT_MAX, unrolled, **common)
+
+    assert jnp.allclose(got.positions, reference.positions, rtol=0.0, atol=1.0e-14)
+    assert jnp.allclose(got.velocities, reference.velocities, rtol=0.0, atol=1.0e-14)
+    assert jnp.array_equal(got.rung, reference.rung)
     assert int(jnp.max(got.rung)) > int(jnp.min(got.rung))
 
 
@@ -193,6 +247,22 @@ def test_fused_gradient_wrt_masses_matches_finite_difference() -> None:
 
     assert jnp.all(jnp.isfinite(grad_ad))
     assert jnp.allclose(grad_ad, grad_fd, atol=1.0e-5, rtol=1.0e-4)
+
+
+def test_scanned_and_unrolled_fused_gradients_agree() -> None:
+    """Scanning the boundaries leaves the discrete adjoint where unrolling put it."""
+    positions, velocities, masses, scanned, rung0 = _fused_system(seed=7)
+    unrolled = _StaticWeightsOnly(softening=_EPS, k_max=_K_MAX)
+
+    grad_scanned = jax.grad(
+        lambda p: _frozen_loss(p, velocities, masses, scanned, rung0)
+    )(positions)
+    grad_unrolled = jax.grad(
+        lambda p: _frozen_loss(p, velocities, masses, unrolled, rung0)
+    )(positions)
+
+    assert jnp.all(jnp.isfinite(grad_scanned))
+    assert jnp.allclose(grad_scanned, grad_unrolled, rtol=1.0e-12, atol=1.0e-14)
 
 
 def test_fused_and_per_level_gradients_agree() -> None:

@@ -17,6 +17,7 @@ from .leapfrog_kdk import (
     initialize_block_state,
     leapfrog_kdk_rollout,
     leapfrog_kdk_step,
+    supports_traced_level_weights,
     total_acceleration,
 )
 
@@ -37,5 +38,6 @@ __all__ = [
     "initialize_block_state",
     "leapfrog_kdk_rollout",
     "leapfrog_kdk_step",
+    "supports_traced_level_weights",
     "total_acceleration",
 ]

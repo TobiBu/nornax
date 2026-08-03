@@ -10,6 +10,8 @@ layered on in later steps.
 
 from __future__ import annotations
 
+import inspect
+
 import jax
 import jax.numpy as jnp
 
@@ -17,6 +19,7 @@ from nornax._typing import IntPerParticle, PerParticle, ScalarLike, Vec3
 from nornax.blockstep.rungs import assign_rungs
 from nornax.blockstep.schedule import (
     active_level_floor,
+    boundary_weight_table,
     is_sync_boundary,
     n_sub,
     stride,
@@ -53,6 +56,42 @@ def fused_boundary_model(
             "wrong level range"
         )
     return force
+
+
+def supports_traced_level_weights(force: FusedMutualForceModel) -> bool:
+    """Return whether ``force.boundary_kick`` honors a traced ``level_weights``.
+
+    Traced weights are what let the integrator walk the boundaries with a
+    ``lax.scan`` instead of unrolling ``2**k_max`` of them, but they are an
+    *optional* extension of the fused contract: a backend that implements only
+    the static ``active_floor``/``half`` form stays supported and keeps the
+    unrolled path.
+
+    A model settles the question outright with a ``traced_boundary_weights``
+    attribute (``True`` to scan, ``False`` to keep the boundaries unrolled --
+    the escape hatch for a backend that prunes inactive levels at trace time and
+    would rather not evaluate them with weight zero). Otherwise the probe looks
+    for an explicit ``level_weights`` parameter in ``boundary_kick``'s signature.
+    A bare ``**kwargs`` does not count: a model that swallows ``level_weights``
+    and kicks with a stale ``active_floor`` would integrate the wrong equations
+    while passing every smoke test, so the probe demands proof rather than
+    assuming. The scanned path then passes *only* ``level_weights``, leaving no
+    stale ``active_floor`` for such a model to fall back on -- it fails loudly
+    instead.
+
+    A model whose signature cannot be inspected (a C-level or heavily wrapped
+    callable) is treated as not supporting traced weights; declaring
+    ``traced_boundary_weights = True`` opts it back in.
+    """
+    declared = getattr(force, "traced_boundary_weights", None)
+    if declared is not None:
+        return bool(declared)
+    try:
+        parameters = inspect.signature(force.boundary_kick).parameters
+    except (TypeError, ValueError):
+        return False
+    weights = parameters.get("level_weights")
+    return weights is not None and weights.kind is not weights.VAR_KEYWORD
 
 
 def total_acceleration(
@@ -210,22 +249,30 @@ def advance_base_step(
     returns *weighted* levels, from which the unweighted total cannot be recovered,
     and ``acc`` must keep meaning the full acceleration.
 
-    The fused path walks the boundaries with a Python loop, not the ``lax.scan``
-    above, because ``boundary_kick`` takes ``active_floor`` and ``half`` as static
-    values -- that is the cross-repo contract jaccpot's ``BlockStepFMM`` implements,
-    and it is what lets a backend bake the level weights into its traversal. So the
-    fused graph carries ``2**k_max`` boundary kicks where the per-level graph
-    carries ``k_max + 1`` guarded evaluations: fusion trades trace size for runtime
-    evaluations. That is the right trade for a tree backend, where one traversal per
-    boundary is the dominant cost, and the wrong one for a cheap direct sum -- which
-    is why fusion is opt-in. Lifting it to a scan needs ``boundary_kick`` to accept
-    a *traced* boundary index (level weights as an array rather than a static
-    tuple), which is a change on the backend side of the contract.
+    The fused path also walks the boundaries with a ``lax.scan`` when the model
+    accepts a traced ``level_weights`` vector (see
+    :func:`supports_traced_level_weights`): the boundary schedule is a
+    compile-time constant, so ``dt_max * boundary_weight_table(k_max)`` can be
+    indexed with the scan's own boundary index and the graph holds *one* boundary
+    kick regardless of ``k_max``, while the runtime still performs ``n_sub + 1``
+    kicks. Unrolling instead traces ``2**k_max`` of them -- 9 at ``k_max = 3``, 33
+    at ``k_max = 5`` -- which for a tree backend is a whole traversal's worth of
+    graph each. Only ``level_weights`` is passed there, so a model that accepted
+    the argument and ignored it has no stale ``active_floor`` to kick with: it
+    fails loudly rather than integrating the wrong equations.
+
+    A fused model that implements only the static ``active_floor``/``half`` form
+    keeps the unrolled Python loop over the boundaries -- the original cross-repo
+    contract, still supported. Either way fusion trades trace size for runtime
+    evaluations, which is the right trade for a tree backend, where one traversal
+    per boundary is the dominant cost, and the wrong one for a cheap direct sum;
+    hence fusion stays opt-in.
     """
     dt_max = jnp.asarray(dt_max, dtype=state.positions.dtype)
     ns = n_sub(k_max)
     dt_min = dt_max / ns
     fused = fused_boundary_model(force, k_max)
+    scan_boundaries = fused is not None and supports_traced_level_weights(fused)
     masses = state.masses
     rung = state.rung
     # stride_k in units of the smallest sub-step; level k is active at boundary s
@@ -260,8 +307,44 @@ def advance_base_step(
         pos = pos + jnp.where(s < ns, dt_min, jnp.asarray(0.0, pos.dtype)) * vel
         return (pos, vel, end_acc), None
 
-    if fused is not None:
+    if scan_boundaries:
+        # The schedule is data-independent, so the whole (n_sub + 1, k_max + 1)
+        # weight table is a compile-time constant -- 72 floats at k_max = 3 --
+        # indexable with the scan's traced boundary index. Scaling the unit table
+        # by dt_max is exact (every entry is a power of two) and keeps dt_max
+        # traced, hence differentiable.
+        weight_table = dt_max * jnp.asarray(
+            boundary_weight_table(k_max), dtype=state.positions.dtype
+        )
 
+        def weighted_kick(pos, vel, weights):
+            """Kick one boundary from its per-level weight row, in one fused call."""
+            return fused.boundary_kick(
+                pos, vel, masses, rung=rung, level_weights=weights, args=args
+            )
+
+        # Everything is an array now, so no static_argnums are needed to remat.
+        weighted_kick_fn = (
+            jax.checkpoint(weighted_kick) if checkpoint_substeps else weighted_kick
+        )
+
+        def fused_body(carry, s):
+            pos, vel = carry
+            vel = weighted_kick_fn(pos, vel, weight_table[s])
+            # Drift to the next boundary (a no-op after the final kick), written
+            # as a select so every scan iteration has one shape.
+            pos = pos + jnp.where(s < ns, dt_min, jnp.asarray(0.0, pos.dtype)) * vel
+            return (pos, vel), None
+
+        (pos, vel), _ = jax.lax.scan(
+            fused_body,
+            (state.positions, state.velocities),
+            jnp.arange(ns + 1, dtype=jnp.int32),
+        )
+        end_acc = fused.total_accelerations(pos, masses, rung=rung, args=args)
+    elif fused is not None:
+        # Static-only fused contract: the boundaries have to be unrolled, because
+        # active_floor and half must be concrete for the model to weight its levels.
         def fused_kick(pos, vel, active_floor, half):
             """Apply every level at or above ``active_floor`` in one fused call."""
             return fused.boundary_kick(
