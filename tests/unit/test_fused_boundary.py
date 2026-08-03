@@ -501,7 +501,8 @@ def test_scanned_fused_base_step_matches_the_unrolled_one(k_max: int) -> None:
     Python loop over static ``active_floor``/``half`` values. To round-off rather
     than bit for bit -- the weights are identical (asserted above), but the two
     graph shapes let XLA associate and contract the arithmetic differently, which
-    is worth about an ulp.
+    is worth a few ulp (measured up to ~1e-14 relative on ``acc``, and it moves
+    with the XLA version, hence the order-of-magnitude headroom below).
     """
     positions, velocities, masses, rung = _multi_rung_state(k_max, seed=19)
     scanned = MutualDirectSumGravity(softening=_SOFT, k_max=k_max)
@@ -516,9 +517,9 @@ def test_scanned_fused_base_step_matches_the_unrolled_one(k_max: int) -> None:
     got = advance_base_step(state, _DT_MAX, scanned, k_max=k_max)
     expected = advance_base_step(state, _DT_MAX, unrolled, k_max=k_max)
 
-    assert jnp.allclose(got.positions, expected.positions, rtol=1e-14, atol=1e-16)
-    assert jnp.allclose(got.velocities, expected.velocities, rtol=1e-14, atol=1e-16)
-    assert jnp.allclose(got.acc, expected.acc, rtol=1e-14, atol=1e-16)
+    assert jnp.allclose(got.positions, expected.positions, rtol=1e-13, atol=1e-15)
+    assert jnp.allclose(got.velocities, expected.velocities, rtol=1e-13, atol=1e-15)
+    assert jnp.allclose(got.acc, expected.acc, rtol=1e-13, atol=1e-15)
     assert jnp.array_equal(got.rung, expected.rung)
     assert int(got.base_index) == int(expected.base_index)
 

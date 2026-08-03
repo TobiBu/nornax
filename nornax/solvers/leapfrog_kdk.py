@@ -68,10 +68,19 @@ def supports_traced_level_weights(force: FusedMutualForceModel) -> bool:
     unrolled path.
 
     A model settles the question outright with a ``traced_boundary_weights``
-    attribute (``True`` to scan, ``False`` to keep the boundaries unrolled --
-    the escape hatch for a backend that prunes inactive levels at trace time and
-    would rather not evaluate them with weight zero). Otherwise the probe looks
-    for an explicit ``level_weights`` parameter in ``boundary_kick``'s signature.
+    attribute: ``True`` to scan, ``False`` to keep the boundaries unrolled. Two
+    kinds of backend want to decline. One prunes inactive levels at trace time
+    (a direct sum) and would rather not evaluate them with weight zero. The other
+    pays for the scan in *compile* memory: a backend whose inner kernels are
+    separately jitted has its executables reused by the unrolled Python loop,
+    whereas the scan must inline the whole force into one program -- jaccpot
+    measured 2.67 GB against 2.08 GB peak for its own scanned base step, enough
+    to OOM a CI worker. Scanning trades that for trace size, which is the right
+    trade under an outer ``jit`` over a rollout, or at a ``k_max`` deep enough
+    that ``2**k_max`` unrolled kicks stop fitting.
+
+    Otherwise the probe looks for an explicit ``level_weights`` parameter in
+    ``boundary_kick``'s signature.
     A bare ``**kwargs`` does not count: a model that swallows ``level_weights``
     and kicks with a stale ``active_floor`` would integrate the wrong equations
     while passing every smoke test, so the probe demands proof rather than
