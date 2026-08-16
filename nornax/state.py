@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
-from nornax._typing import PerParticle, Scalar, Vec3
+from nornax._typing import IntPerParticle, IntScalar, PerParticle, Scalar, Vec3
 
 
 class ForceDerivatives(NamedTuple):
@@ -36,6 +36,42 @@ class NBodyState(NamedTuple):
     masses: PerParticle
     time: Scalar
     derivs: ForceDerivatives
+
+    @property
+    def n_particles(self) -> int:
+        """Return the number of particles."""
+        return int(self.positions.shape[0])
+
+    def kinetic_energy(self) -> Scalar:
+        """Compute the total kinetic energy."""
+        v2 = jnp.sum(self.velocities**2, axis=-1)
+        return 0.5 * jnp.sum(self.masses * v2)
+
+
+class BlockStepState(NamedTuple):
+    """Immutable JAX PyTree for the block-power-of-two individual-timestep state.
+
+    This is the state carried by the KDK leapfrog integrator. Unlike
+    ``NBodyState`` (which caches the full Hermite derivative ladder and a scalar
+    physical time), it stores only the acceleration and a per-particle ``rung``.
+
+    The scheme is *synchronized*: every particle drifts by the smallest sub-step
+    on every sub-step, so all particles share one physical time and no
+    per-particle time leaf is needed. Physical time is derived from the integer
+    counters as ``(base_index * n_sub + s) * dt_min`` rather than accumulated as
+    a float, so it does not drift over long rollouts.
+
+    The kinematic leaves (``positions``, ``velocities``, ``masses``, ``acc``)
+    carry autodiff gradients; ``rung`` and ``base_index`` are discrete bookkeeping
+    that the integrator severs from the gradient with ``stop_gradient``.
+    """
+
+    positions: Vec3
+    velocities: Vec3
+    masses: PerParticle
+    acc: Vec3
+    rung: IntPerParticle
+    base_index: IntScalar
 
     @property
     def n_particles(self) -> int:

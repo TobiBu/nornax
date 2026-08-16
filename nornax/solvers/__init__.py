@@ -9,6 +9,17 @@ from .hermite4 import (
 )
 from .hermite6 import Hermite6, hermite6_step
 from .hermite8 import Hermite8, hermite8_step
+from .leapfrog_kdk import (
+    advance_base_step,
+    block_kdk_base_step,
+    block_kdk_rollout,
+    fused_boundary_model,
+    initialize_block_state,
+    leapfrog_kdk_rollout,
+    leapfrog_kdk_step,
+    supports_traced_level_weights,
+    total_acceleration,
+)
 
 __all__ = [
     "Hermite4",
@@ -16,8 +27,17 @@ __all__ = [
     "Hermite4State",
     "Hermite6",
     "Hermite8",
+    "advance_base_step",
+    "block_kdk_base_step",
+    "block_kdk_rollout",
+    "fused_boundary_model",
     "hermite4_adaptive_scan",
     "hermite4_step",
     "hermite6_step",
     "hermite8_step",
+    "initialize_block_state",
+    "leapfrog_kdk_rollout",
+    "leapfrog_kdk_step",
+    "supports_traced_level_weights",
+    "total_acceleration",
 ]

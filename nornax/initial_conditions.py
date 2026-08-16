@@ -42,6 +42,76 @@ def sample_plummer_sphere(
     return positions, velocities, masses
 
 
+def sample_hernquist_sphere(
+    key: jax.Array,
+    n_particles: int,
+    *,
+    total_mass: float = 1.0,
+    scale_radius: float = 1.0,
+    G: float = 1.0,
+    dtype=jnp.float64,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Sample a centrally-concentrated Hernquist sphere.
+
+    Positions follow the Hernquist (1990) profile via its analytic inverse
+    cumulative-mass function ``r = a sqrt(u) / (1 - sqrt(u))``. The steep
+    ``r^-1`` central cusp gives a wide spread of accelerations -- the regime where
+    individual timesteps pay off. Velocities are drawn from an isotropic Maxwellian
+    using the analytic isotropic radial dispersion (Hernquist 1990, eq. 10), an
+    approximate-equilibrium seed adequate for integrator benchmarks.
+    """
+    if n_particles <= 0:
+        raise ValueError("n_particles must be positive")
+
+    pos_key, vel_key = jax.random.split(key)
+    a = jnp.asarray(scale_radius, dtype=dtype)
+
+    u = jax.random.uniform(
+        pos_key,
+        (n_particles,),
+        minval=jnp.asarray(1.0e-4, dtype=dtype),
+        maxval=jnp.asarray(0.96, dtype=dtype),
+        dtype=dtype,
+    )
+    root = jnp.sqrt(u)
+    radii = a * root / (1.0 - root)
+    dir_key, speed_key = jax.random.split(vel_key)
+    positions = _sample_isotropic_vectors(dir_key, radii, dtype=dtype)
+
+    sigma = jnp.sqrt(
+        _hernquist_sigma_squared(radii, a=a, total_mass=total_mass, G=G, dtype=dtype)
+    )
+    velocities = sigma[:, None] * jax.random.normal(
+        speed_key, (n_particles, 3), dtype=dtype
+    )
+    masses = jnp.full((n_particles,), total_mass / n_particles, dtype=dtype)
+    return positions, velocities, masses
+
+
+def _hernquist_sigma_squared(
+    radii: jnp.ndarray,
+    *,
+    a: jnp.ndarray,
+    total_mass: float,
+    G: float,
+    dtype,
+) -> jnp.ndarray:
+    """Return the isotropic Hernquist radial velocity dispersion squared.
+
+    Hernquist (1990), eq. 10, written in terms of ``x = r / a``. The two bracketed
+    terms nearly cancel at large ``x``; fp64 keeps this accurate over the sampled
+    range.
+    """
+    gm = jnp.asarray(G * total_mass, dtype=dtype)
+    x = radii / a
+    x = jnp.clip(x, jnp.asarray(1.0e-6, dtype=dtype), None)
+    log_term = 12.0 * x * (1.0 + x) ** 3 * jnp.log((1.0 + x) / x)
+    poly = 25.0 + 52.0 * x + 42.0 * x**2 + 12.0 * x**3
+    bracket = log_term - (x / (1.0 + x)) * poly
+    sigma2 = (gm / (12.0 * a)) * bracket
+    return jnp.clip(sigma2, jnp.asarray(0.0, dtype=dtype), None)
+
+
 def _sample_plummer_positions(
     key: jax.Array,
     n_particles: int,

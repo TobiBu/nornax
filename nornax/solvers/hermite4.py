@@ -293,7 +293,11 @@ def hermite4_adaptive_solve(
 
 if dfx is not None:
 
-    @dataclass
+    # Not decorated with ``@dataclass``: ``AbstractSolver`` is an
+    # ``equinox.Module``, whose metaclass already makes every subclass a frozen
+    # dataclass. Under equinox < 0.13 the base is a frozen dataclass itself, so a
+    # redundant non-frozen ``@dataclass`` here fails at import time -- see the
+    # note on ``NBodyTerm`` in ``nornax/terms.py``.
     class Hermite4(dfx.AbstractSolver):
         """Diffrax-facing Hermite-4 solver scaffold.
 

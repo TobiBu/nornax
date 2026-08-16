@@ -46,3 +46,17 @@ def total_angular_momentum(state: NBodyState) -> Float[Array, "3"]:
     """Return the total angular momentum vector."""
     momentum = state.masses[:, None] * state.velocities
     return jnp.sum(jnp.cross(state.positions, momentum), axis=0)
+
+
+def total_linear_momentum(
+    masses: PerParticle,
+    velocities: Vec3,
+) -> Float[Array, "3"]:
+    """Return the total linear momentum vector ``sum_i m_i v_i``.
+
+    Takes the kinematic arrays directly (rather than a state object) so it
+    applies to both ``NBodyState`` and the block-step ``BlockStepState``. Linear
+    momentum is the defining conserved quantity of the momentum-conserving KDK
+    leapfrog, so tests assert it to floating-point round-off.
+    """
+    return jnp.sum(masses[:, None] * velocities, axis=0)
