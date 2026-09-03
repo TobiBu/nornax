@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax.numpy as jnp
 
@@ -64,6 +64,16 @@ class BlockStepState(NamedTuple):
     The kinematic leaves (``positions``, ``velocities``, ``masses``, ``acc``)
     carry autodiff gradients; ``rung`` and ``base_index`` are discrete bookkeeping
     that the integrator severs from the gradient with ``stop_gradient``.
+
+    ``topology`` is the optional seventh leaf: an opaque pytree (a tree backend's
+    frozen interaction structure) that
+    :func:`~nornax.solvers.leapfrog_kdk.block_kdk_rollout` carries through its
+    scan and rebuilds at base-step boundaries only. It defaults to ``None``,
+    which is an *empty* pytree -- a state built without it flattens to the same
+    six leaves as before, so existing carries, ``tree_map`` calls and checkpoints
+    are unchanged. Like ``rung`` it is discrete bookkeeping: the rollout severs
+    whatever ``rebuild_fn`` returns from the gradient, and the numeric leaves keep
+    the exact fixed-topology gradient (see the rollout's docstring and D-006).
     """
 
     positions: Vec3
@@ -72,6 +82,7 @@ class BlockStepState(NamedTuple):
     acc: Vec3
     rung: IntPerParticle
     base_index: IntScalar
+    topology: Any = None
 
     @property
     def n_particles(self) -> int:

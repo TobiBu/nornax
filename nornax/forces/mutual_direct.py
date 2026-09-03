@@ -74,9 +74,17 @@ class MutualDirectSumGravity:
         rung: IntPerParticle,
         level: int,
         args: object = None,
+        topology: object = None,
     ) -> Vec3:
-        """Return the level-``k`` antisymmetric acceleration for every particle."""
-        del args
+        """Return the level-``k`` antisymmetric acceleration for every particle.
+
+        ``topology`` is accepted and ignored: a direct sum has no interaction
+        structure to freeze, so the protocol's "use it if given, else what the
+        model holds" contract has nothing to select here. Accepting it is what
+        lets this model stand in for a tree backend when the integrator's
+        rebuild cadence is under test.
+        """
+        del args, topology
         if self.buckets is None:
             return _oracle_level_accelerations(
                 positions, masses, rung, level, self.G, self.softening
@@ -99,6 +107,7 @@ class MutualDirectSumGravity:
         *,
         rung: IntPerParticle | None = None,
         args: object = None,
+        topology: object = None,
     ) -> Vec3:
         """Return the full acceleration as the sum over levels ``0 .. k_max``.
 
@@ -108,8 +117,10 @@ class MutualDirectSumGravity:
         collapses the sum to a single dense evaluation.
 
         Raises ``ValueError`` when ``rung`` is given but ``k_max`` is unset, so
-        the level range of the sum would be undefined.
+        the level range of the sum would be undefined. ``topology`` is accepted
+        and ignored, as on :meth:`level_accelerations`.
         """
+        del topology
         if rung is None:
             zero = jnp.zeros(positions.shape[0], dtype=jnp.int32)
             return self.level_accelerations(
@@ -139,6 +150,7 @@ class MutualDirectSumGravity:
         half: float = 1.0,
         level_weights: PerLevel | None = None,
         args: object = None,
+        topology: object = None,
     ) -> Vec3:
         """Kick every level ``k >= active_floor`` by ``half * dt_max / 2**k``.
 
@@ -166,8 +178,10 @@ class MutualDirectSumGravity:
         Raises ``ValueError`` when ``k_max`` is unset (the boundary's level range
         would be undefined), when neither ``level_weights`` nor
         ``active_floor``/``dt_max`` is given, and when ``level_weights`` has the
-        wrong length for ``k_max``.
+        wrong length for ``k_max``. ``topology`` is accepted and ignored, as on
+        :meth:`level_accelerations`.
         """
+        del topology
         if self.k_max is None:
             raise ValueError(
                 "boundary_kick needs k_max to know which levels the boundary "

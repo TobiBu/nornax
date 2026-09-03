@@ -11,6 +11,8 @@ layered on in later steps.
 from __future__ import annotations
 
 import inspect
+from collections.abc import Callable
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -184,6 +186,7 @@ def leapfrog_kdk_step(
         acc=a_new,
         rung=state.rung,
         base_index=state.base_index + 1,
+        topology=state.topology,
     )
 
 
@@ -276,9 +279,18 @@ def advance_base_step(
     evaluations, which is the right trade for a tree backend, where one traversal
     per boundary is the dominant cost, and the wrong one for a cheap direct sum;
     hence fusion stays opt-in.
+
+    If ``state.topology`` is not ``None`` it is handed to every force call of the
+    base step as the explicit ``topology=`` keyword (see
+    :class:`~nornax.forces.base.MutualForceModel`), the *same* value at every
+    boundary: this function never rebuilds it. A state without a topology is
+    stepped with exactly the calls made before the keyword existed.
     """
     dt_max = jnp.asarray(dt_max, dtype=state.positions.dtype)
     ns = n_sub(k_max)
+    # Passed only when carried, so a model that predates the keyword -- or a
+    # caller who never opted in -- sees the unchanged call.
+    topo_kw = {} if state.topology is None else {"topology": state.topology}
     dt_min = dt_max / ns
     fused = fused_boundary_model(force, k_max)
     scan_boundaries = fused is not None and supports_traced_level_weights(fused)
@@ -296,7 +308,7 @@ def advance_base_step(
             def do(operands, k=k):
                 v, ea = operands
                 a_k = force.level_accelerations(
-                    pos, masses, rung=rung, level=k, args=args
+                    pos, masses, rung=rung, level=k, args=args, **topo_kw
                 )
                 v = v + (half * dt_max / (1 << k)) * a_k
                 ea = jnp.where(at_end, ea + a_k, ea)  # full accel only at s == ns
@@ -329,7 +341,13 @@ def advance_base_step(
         def weighted_kick(pos, vel, weights):
             """Kick one boundary from its per-level weight row, in one fused call."""
             return fused.boundary_kick(
-                pos, vel, masses, rung=rung, level_weights=weights, args=args
+                pos,
+                vel,
+                masses,
+                rung=rung,
+                level_weights=weights,
+                args=args,
+                **topo_kw,
             )
 
         # Everything is an array now, so no static_argnums are needed to remat.
@@ -350,7 +368,9 @@ def advance_base_step(
             (state.positions, state.velocities),
             jnp.arange(ns + 1, dtype=jnp.int32),
         )
-        end_acc = fused.total_accelerations(pos, masses, rung=rung, args=args)
+        end_acc = fused.total_accelerations(
+            pos, masses, rung=rung, args=args, **topo_kw
+        )
     elif fused is not None:
         # Static-only fused contract: the boundaries have to be unrolled, because
         # active_floor and half must be concrete for the model to weight its levels.
@@ -365,6 +385,7 @@ def advance_base_step(
                 dt_max=dt_max,
                 half=half,
                 args=args,
+                **topo_kw,
             )
 
         # active_floor and half are static by contract, hence static_argnums.
@@ -383,7 +404,9 @@ def advance_base_step(
             )
             if s < ns:
                 pos = pos + dt_min * vel
-        end_acc = fused.total_accelerations(pos, masses, rung=rung, args=args)
+        end_acc = fused.total_accelerations(
+            pos, masses, rung=rung, args=args, **topo_kw
+        )
     else:
         init = (state.positions, state.velocities, jnp.zeros_like(state.positions))
         (pos, vel, end_acc), _ = jax.lax.scan(
@@ -397,6 +420,7 @@ def advance_base_step(
         acc=end_acc,
         rung=rung,
         base_index=state.base_index + 1,
+        topology=state.topology,
     )
 
 
@@ -443,6 +467,9 @@ def block_kdk_rollout(
     checkpoint: bool = True,
     reassign_rungs: bool = True,
     checkpoint_substeps: bool = False,
+    topology: Any = None,
+    rebuild_fn: Callable[[Vec3, PerParticle], Any] | None = None,
+    rebuild_every: int = 1,
 ) -> BlockStepState:
     """Roll out ``n_base`` block-step KDK base steps with a fixed-length ``lax.scan``.
 
@@ -466,8 +493,85 @@ def block_kdk_rollout(
     hold the initial rungs fixed for the whole rollout, which makes the map globally
     smooth in the continuous state -- the frozen-schedule setting used for
     finite-difference gradient checks.
+
+    **Per-base-step topology.** A tree/FMM backend evaluates against a frozen
+    interaction structure -- its *topology* -- that must be rebuilt as the
+    particles move, and a host-side rebuild cannot happen inside the scan. The
+    three optional arguments give the topology a place in the scan **carry**
+    (``BlockStepState.topology``) and a cadence:
+
+    * ``topology`` is the structure in force when the rollout starts, i.e. for
+      base step ``state.base_index``. It defaults to ``state.topology`` -- a
+      state returned by an earlier rollout resumes on the topology it carried,
+      with no rebuild at the seam -- and when neither is present but
+      ``rebuild_fn`` is, it is built from the initial state before the scan.
+    * ``rebuild_fn(positions, masses) -> topology`` is the caller's traceable
+      rebuild (for jaccpot: ``force.rebuild_state`` after one host-side
+      ``force.freeze_template``). It is called under a :func:`jax.lax.cond`
+      **before** every base step whose index is a multiple of ``rebuild_every``,
+      other than the entry step, whose topology is already in hand. Starting
+      from ``base_index = 0`` that is exactly ``ceil(n_base / rebuild_every)``
+      builds over the rollout, the first being the seed. It is never called from
+      inside :func:`advance_base_step`: every sub-step boundary of a base step
+      is kicked against the one value carried into that step.
+    * ``rebuild_every`` is the number of base steps per rebuild -- ``1``
+      rebuilds at every boundary; ``k`` runs a segment of ``k`` base steps on
+      one frozen topology. Requires ``rebuild_fn``.
+
+    The carried topology reaches the force model as the explicit ``topology=``
+    keyword of :class:`~nornax.forces.base.MutualForceModel`'s methods, and only
+    when one is carried -- with both arguments left at their defaults every call
+    the integrator makes is unchanged.
+
+    This placement makes decision D-006 of the EDDA programme -- *tree rebuilds
+    are confined to major-timestep boundaries* -- a property the rollout
+    guarantees rather than a convention a driver has to keep: the only site that
+    can change the topology is this scan body, and it sits between base steps.
+    ``rebuild_every > 1`` is the intervalwise-constant mesh of multiple shooting,
+    one segment per rebuild. What the rollout does **not** claim is anything
+    about whether a given cadence keeps the gradient useful; that is a question
+    for the experiments that consume this knob, not for the integrator.
+
+    The topology is treated as frozen bookkeeping, like ``rung``: whatever
+    ``rebuild_fn`` returns is severed from the gradient with ``stop_gradient``,
+    so ``jax.grad`` through a rollout is the exact fixed-topology gradient of the
+    numeric path on every segment. A traced ``topology`` argument is passed
+    through as given.
+
+    Raises ``ValueError`` when ``rebuild_every`` is not a positive integer, or is
+    not ``1`` while ``rebuild_fn`` is ``None`` (a cadence with nothing to run).
     """
     dt_max = jnp.asarray(dt_max, dtype=state.positions.dtype)
+    rebuild_every = int(rebuild_every)
+    if rebuild_every < 1:
+        raise ValueError(f"rebuild_every must be >= 1; got {rebuild_every}")
+    if rebuild_fn is None and rebuild_every != 1:
+        raise ValueError(
+            "rebuild_every has no effect without rebuild_fn; pass the traceable "
+            "(positions, masses) -> topology rebuild to set a cadence"
+        )
+
+    if topology is None:
+        topology = state.topology
+    if topology is None and rebuild_fn is not None:
+        # Seed at the entry boundary so the carry has the structure lax.cond
+        # needs for both of its branches.
+        topology = jax.lax.stop_gradient(rebuild_fn(state.positions, state.masses))
+    state = state._replace(topology=topology)
+    entry_index = state.base_index
+
+    def rebuild(carry: BlockStepState) -> BlockStepState:
+        """Rebuild the topology before this base step if the cadence says so."""
+        due = (carry.base_index % rebuild_every == 0) & (
+            carry.base_index != entry_index
+        )
+        new_topology = jax.lax.cond(
+            due,
+            lambda c: jax.lax.stop_gradient(rebuild_fn(c.positions, c.masses)),
+            lambda c: c.topology,
+            carry,
+        )
+        return carry._replace(topology=new_topology)
 
     def base(carry: BlockStepState) -> BlockStepState:
         if reassign_rungs:
@@ -493,6 +597,12 @@ def block_kdk_rollout(
     step = jax.checkpoint(base) if checkpoint else base
 
     def body(carry: BlockStepState, _: None) -> tuple[BlockStepState, None]:
+        # The rebuild sits between base steps and outside the checkpointed base
+        # step: the carry is a scan residual either way, so keeping the rebuilt
+        # topology in it costs no extra memory, while putting the rebuild inside
+        # the remat would recompute a whole traversal per step in the backward.
+        if rebuild_fn is not None:
+            carry = rebuild(carry)
         return step(carry), None
 
     final, _ = jax.lax.scan(body, state, xs=None, length=n_base)

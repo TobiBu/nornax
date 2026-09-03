@@ -36,8 +36,10 @@ def _system(n: int = 6, seed: int = 0):
     return positions, velocities, masses, force, rung0
 
 
-def _frozen_loss(positions, velocities, masses, force, rung0, *, checkpoint=True):
-    """Scalar summary of the final state under a frozen-schedule rollout."""
+def _frozen_rollout(
+    positions, velocities, masses, force, rung0, *, checkpoint=True, **kw
+):
+    """Final state of a frozen-schedule rollout from the given initial leaves."""
     state = BlockStepState(
         positions=positions,
         velocities=velocities,
@@ -46,7 +48,7 @@ def _frozen_loss(positions, velocities, masses, force, rung0, *, checkpoint=True
         rung=rung0,
         base_index=jnp.asarray(0, jnp.int32),
     )
-    final = block_kdk_rollout(
+    return block_kdk_rollout(
         state,
         _DT_MAX,
         force,
@@ -54,6 +56,14 @@ def _frozen_loss(positions, velocities, masses, force, rung0, *, checkpoint=True
         n_base=_N_BASE,
         checkpoint=checkpoint,
         reassign_rungs=False,
+        **kw,
+    )
+
+
+def _frozen_loss(positions, velocities, masses, force, rung0, *, checkpoint=True, **kw):
+    """Scalar summary of the final state under a frozen-schedule rollout."""
+    final = _frozen_rollout(
+        positions, velocities, masses, force, rung0, checkpoint=checkpoint, **kw
     )
     return jnp.sum(final.positions**2) + jnp.sum(final.velocities**2)
 
@@ -140,3 +150,69 @@ def test_no_gradient_flows_through_the_rung_schedule() -> None:
 
     assert jnp.all(jnp.isfinite(grad_reassigning))
     assert jnp.allclose(grad_frozen, grad_reassigning, atol=1.0e-8)
+
+
+def _centroid_topology(positions, masses):
+    """A stand-in ``rebuild_fn``: a numeric function of the state, as a real one is."""
+    return {"centre": jnp.sum(masses[:, None] * positions, axis=0) / jnp.sum(masses)}
+
+
+def test_gradient_matches_finite_difference_with_a_rebuild_cadence() -> None:
+    """The ``lax.cond`` rebuild gate and the carried leaf leave the numeric gradient intact.
+
+    ``rebuild_every = 2`` over ``_N_BASE = 8`` base steps performs four rebuilds
+    (the seed and three in the scan). The direct sum ignores the topology, so
+    the trajectory is the frozen-schedule one and reverse mode through the
+    rollout must still match central differences to the suite's tolerance.
+    """
+    positions, velocities, masses, force, rung0 = _system(seed=5)
+
+    def loss(p):
+        return _frozen_loss(
+            p,
+            velocities,
+            masses,
+            force,
+            rung0,
+            rebuild_fn=_centroid_topology,
+            rebuild_every=2,
+        )
+
+    grad_ad = jax.grad(loss)(positions)
+    grad_fd = _central_diff(loss, positions)
+
+    assert jnp.all(jnp.isfinite(grad_ad))
+    assert jnp.allclose(grad_ad, grad_fd, atol=1.0e-5, rtol=1.0e-4)
+    # And it is the same gradient as without the hook: the topology is carried
+    # alongside the numeric path, not spliced into it.
+    grad_plain = jax.grad(lambda p: _frozen_loss(p, velocities, masses, force, rung0))(
+        positions
+    )
+    assert jnp.allclose(grad_ad, grad_plain, atol=1.0e-12)
+
+
+def test_the_topology_itself_is_severed_from_the_gradient() -> None:
+    """What ``rebuild_fn`` returns is frozen bookkeeping: no cotangent reaches it.
+
+    The frozen-topology contract (D-006): gradients are exact *at fixed
+    topology*. A loss read off the carried topology -- here a centroid that
+    does depend on the positions -- therefore has zero gradient, by design.
+    """
+    positions, velocities, masses, force, rung0 = _system(seed=6)
+
+    def topology_loss(p):
+        final = _frozen_rollout(
+            p,
+            velocities,
+            masses,
+            force,
+            rung0,
+            rebuild_fn=_centroid_topology,
+            rebuild_every=2,
+        )
+        return jnp.sum(final.topology["centre"] ** 2)
+
+    assert float(topology_loss(positions)) > 0.0
+    assert jnp.array_equal(
+        jax.grad(topology_loss)(positions), jnp.zeros_like(positions)
+    )
