@@ -82,6 +82,31 @@ def _energy(state, softening: float) -> float:
     return float(kinetic + potential)
 
 
+def _assert_same_trajectory(got, reference) -> None:
+    """Two rollouts of the same map agree to round-off, relative to the values.
+
+    The two code paths compared here trace to *different graphs* of the same
+    arithmetic (a fused kick over all levels against per-level ``lax.cond``
+    kicks; a scanned weight table against unrolled static weights), and XLA is
+    free to associate and fuse them differently. Over 40 base steps of 9
+    boundaries the accumulated difference is a handful of ulps of values of
+    order one, which an *absolute* ``atol=1e-14`` did hold on jax <= 0.11.0 and
+    stopped holding on jax 0.11.1 / Linux / Python 3.13 (CI, 2026-09-03) with a
+    program that is byte-for-byte the same jaxpr. So the comparison is relative,
+    at the tolerance the unit-level fused tests already use
+    (``tests/unit/test_fused_boundary.py``: ``rtol=1e-13, atol=1e-15``), and the
+    assertion message carries the measured error so a failure reports a number
+    rather than two arrays.
+    """
+    for name in ("positions", "velocities"):
+        g, r = getattr(got, name), getattr(reference, name)
+        rel = float(jnp.linalg.norm(g - r) / jnp.linalg.norm(r))
+        max_abs = float(jnp.max(jnp.abs(g - r)))
+        assert jnp.allclose(
+            g, r, rtol=1.0e-13, atol=1.0e-15
+        ), f"{name}: relative L2 error {rel:.3e}, max abs {max_abs:.3e}"
+
+
 def test_fused_rollout_matches_the_per_level_rollout() -> None:
     """A whole rollout on the fused path reproduces the per-level rollout."""
     soft = 0.05
@@ -98,8 +123,7 @@ def test_fused_rollout_matches_the_per_level_rollout() -> None:
     reference = block_kdk_rollout(state, _DT_MAX, per_level, **common)
     got = block_kdk_rollout(state, _DT_MAX, fused, **common)
 
-    assert jnp.allclose(got.positions, reference.positions, rtol=0.0, atol=1.0e-14)
-    assert jnp.allclose(got.velocities, reference.velocities, rtol=0.0, atol=1.0e-14)
+    _assert_same_trajectory(got, reference)
     assert jnp.array_equal(got.rung, reference.rung)
     # The rollout genuinely exercised more than one rung.
     assert int(jnp.max(got.rung)) > int(jnp.min(got.rung))
@@ -119,8 +143,7 @@ def test_scanned_fused_rollout_matches_the_unrolled_fused_rollout() -> None:
     got = block_kdk_rollout(state, _DT_MAX, scanned, **common)
     reference = block_kdk_rollout(state, _DT_MAX, unrolled, **common)
 
-    assert jnp.allclose(got.positions, reference.positions, rtol=0.0, atol=1.0e-14)
-    assert jnp.allclose(got.velocities, reference.velocities, rtol=0.0, atol=1.0e-14)
+    _assert_same_trajectory(got, reference)
     assert jnp.array_equal(got.rung, reference.rung)
     assert int(jnp.max(got.rung)) > int(jnp.min(got.rung))
 
