@@ -49,6 +49,26 @@ class MutualForceModel(Protocol):
 
     Marked ``runtime_checkable`` so ``isinstance`` and the optional ``beartype``
     hook can validate implementations structurally.
+
+    **The explicit-topology keyword.** A tree/FMM backend holds a frozen
+    interaction structure -- its *topology* -- which is rebuilt at base-step
+    boundaries and reused across every sub-step boundary in between. Every
+    method here accepts an optional ``topology`` keyword with one contract:
+    *if given, evaluate against it; if ``None``, evaluate against whatever the
+    model holds.* The block-step integrator passes it **only** when the state it
+    is stepping carries one (``BlockStepState.topology is not None``), i.e. only
+    when the caller opted into :func:`~nornax.solvers.leapfrog_kdk.block_kdk_rollout`'s
+    ``rebuild_fn``; a model driven without that option is called exactly as
+    before and need not accept the keyword. A model that *does* accept it can be
+    driven with the topology as a traced value in the rollout's scan carry, which
+    is what lets a rebuild happen inside the scan rather than on the host. The
+    keyword is deliberately not ``args``: ``args`` is a caller-owned channel that
+    existing adapters ignore with ``del args``, so overloading it would break any
+    model that uses it for something else, silently.
+
+    The keyword is an *optional extension*, like ``level_weights`` on the fused
+    protocol: it is not a member of the protocol's structural check, so
+    ``isinstance`` keeps accepting every implementation that predates it.
     """
 
     def level_accelerations(
@@ -59,8 +79,14 @@ class MutualForceModel(Protocol):
         rung: IntPerParticle,
         level: int,
         args: object = None,
+        topology: object = None,
     ) -> Vec3:
-        """Return the level-``k`` antisymmetric acceleration for every particle."""
+        """Return the level-``k`` antisymmetric acceleration for every particle.
+
+        ``topology``, when given, is the frozen interaction structure to evaluate
+        against (see the class docstring); ``None`` means "use what the model
+        holds". A backend without a topology accepts and ignores it.
+        """
 
 
 @runtime_checkable
@@ -116,6 +142,7 @@ class FusedMutualForceModel(MutualForceModel, Protocol):
         *,
         rung: IntPerParticle | None = None,
         args: object = None,
+        topology: object = None,
     ) -> Vec3:
         """Return the full acceleration, summed over every level, in one call.
 
@@ -124,6 +151,10 @@ class FusedMutualForceModel(MutualForceModel, Protocol):
         block-step integrator needs this at the end-of-step boundary to seed the
         next base step's rung assignment, and a per-level sum there would put
         ``k_max + 1`` evaluations back into every base step.
+
+        ``topology`` follows the same contract as on
+        :meth:`MutualForceModel.level_accelerations`: evaluate against it when
+        given, against the model's own state when ``None``.
         """
 
     def boundary_kick(
@@ -138,6 +169,7 @@ class FusedMutualForceModel(MutualForceModel, Protocol):
         half: float = 1.0,
         level_weights: PerLevel | None = None,
         args: object = None,
+        topology: object = None,
     ) -> Vec3:
         """Apply one sub-step boundary's kick in a single evaluation.
 
@@ -189,4 +221,10 @@ class FusedMutualForceModel(MutualForceModel, Protocol):
         honor it or not accept it -- which is also why the integrator passes
         *only* ``level_weights`` on the scanned path, leaving no stale
         ``active_floor`` to fall back on.
+
+        ``topology`` follows the same contract as on
+        :meth:`MutualForceModel.level_accelerations`: when given it is the frozen
+        interaction structure this boundary is kicked against, and it is the
+        *same* value for every boundary of a base step -- the integrator rebuilds
+        it at base-step boundaries only, never between sub-steps.
         """

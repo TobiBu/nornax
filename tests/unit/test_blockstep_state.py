@@ -55,6 +55,26 @@ def test_blockstep_state_n_particles_and_kinetic_energy() -> None:
     assert abs(float(state.kinetic_energy()) - expected_ke) < 1.0e-12
 
 
+def test_blockstep_state_topology_defaults_to_an_empty_leaf() -> None:
+    """The optional seventh field is ``None`` -- an empty pytree -- by default.
+
+    So a state built without it still flattens to the six array leaves the
+    integrator has always carried, and every keyword construction site in the
+    package keeps working unchanged.
+    """
+    state = _example_state()
+
+    assert state.topology is None
+    assert len(jax.tree_util.tree_leaves(state)) == 6
+
+    carried = state._replace(topology={"pairs": jnp.arange(3), "n": jnp.asarray(3)})
+    leaves, treedef = jax.tree_util.tree_flatten(carried)
+    assert len(leaves) == 8
+    restored = jax.tree_util.tree_unflatten(treedef, leaves)
+    assert jnp.array_equal(restored.topology["pairs"], jnp.arange(3))
+    assert jax.jit(lambda s: s)(carried).topology["n"] == 3
+
+
 def test_blockstep_state_is_jittable_carry() -> None:
     """The state should survive a jitted identity function as a pytree carry."""
     state = _example_state()
