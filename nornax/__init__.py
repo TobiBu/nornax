@@ -7,6 +7,13 @@ from ._typecheck import enable_runtime_typecheck
 enable_runtime_typecheck()
 
 from .adapters import JaccpotForceModel, JaccpotOptions  # noqa: E402
+from .conformance import (  # noqa: E402
+    ConformanceError,
+    ConformanceReport,
+    assert_fused_boundary_selected,
+    check_mutual_force_model,
+    check_rung_range,
+)
 from .controllers import AarsethController, AdaptiveStepPolicy  # noqa: E402
 from .diagnostics import (  # noqa: E402
     gravitational_potential_energy,
@@ -44,6 +51,8 @@ __all__ = [
     "AarsethController",
     "AdaptiveStepPolicy",
     "BlockStepState",
+    "ConformanceError",
+    "ConformanceReport",
     "ForceDerivatives",
     "FusedMutualForceModel",
     "JaccpotForceModel",
@@ -51,8 +60,11 @@ __all__ = [
     "MutualDirectSumGravity",
     "MutualForceModel",
     "NBodyState",
+    "assert_fused_boundary_selected",
     "block_kdk_base_step",
     "block_kdk_rollout",
+    "check_mutual_force_model",
+    "check_rung_range",
     "gravitational_potential_energy",
     "initialize_block_state",
     "initialize_state",
