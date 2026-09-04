@@ -65,6 +65,7 @@ def test_blockstep_state_topology_defaults_to_an_empty_leaf() -> None:
     state = _example_state()
 
     assert state.topology is None
+    assert state.time is None
     assert len(jax.tree_util.tree_leaves(state)) == 6
 
     carried = state._replace(topology={"pairs": jnp.arange(3), "n": jnp.asarray(3)})

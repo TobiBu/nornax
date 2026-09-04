@@ -127,6 +127,13 @@ def total_acceleration(
     return acc
 
 
+def _advance_time(time: Any, dt: Any) -> Any:
+    """Advance the optional ``time`` leaf by ``dt``; ``None`` stays ``None``."""
+    if time is None:
+        return None
+    return time + dt
+
+
 def initialize_block_state(
     positions: Vec3,
     velocities: Vec3,
@@ -187,6 +194,7 @@ def leapfrog_kdk_step(
         rung=state.rung,
         base_index=state.base_index + 1,
         topology=state.topology,
+        time=_advance_time(state.time, dt),
     )
 
 
@@ -421,6 +429,7 @@ def advance_base_step(
         rung=rung,
         base_index=state.base_index + 1,
         topology=state.topology,
+        time=_advance_time(state.time, dt_max),
     )
 
 
@@ -470,7 +479,8 @@ def block_kdk_rollout(
     topology: Any = None,
     rebuild_fn: Callable[[Vec3, PerParticle], Any] | None = None,
     rebuild_every: int = 1,
-) -> BlockStepState:
+    record_fn: Callable[[BlockStepState], Any] | None = None,
+) -> BlockStepState | tuple[BlockStepState, Any]:
     """Roll out ``n_base`` block-step KDK base steps with a fixed-length ``lax.scan``.
 
     The step count is static, so the scan traces once and runs on device. With
@@ -538,6 +548,17 @@ def block_kdk_rollout(
     numeric path on every segment. A traced ``topology`` argument is passed
     through as given.
 
+    **Per-base-step records.** ``record_fn(state) -> pytree`` is called on the
+    state *after* every base step, inside the scan, and its results are stacked
+    along a leading ``n_base`` axis as the scan's ``ys``. With it given the
+    rollout returns ``(final, records)``; without it, ``final`` alone, exactly as
+    before. The state passed in carries everything a driver used to record by
+    walking the boundaries itself -- ``velocities`` and ``masses`` for the
+    momentum, ``rung`` for the histogram, ``topology`` for a tree backend's pair
+    counts and overflow flag -- so a per-step overflow reduction is one
+    ``jnp.any`` over the records rather than a reason to reimplement the base
+    step. ``record_fn`` is traced once; it may not have Python side effects.
+
     Raises ``ValueError`` when ``rebuild_every`` is not a positive integer, or is
     not ``1`` while ``rebuild_fn`` is ``None`` (a cadence with nothing to run).
     """
@@ -596,14 +617,109 @@ def block_kdk_rollout(
 
     step = jax.checkpoint(base) if checkpoint else base
 
-    def body(carry: BlockStepState, _: None) -> tuple[BlockStepState, None]:
+    def body(carry: BlockStepState, _: None) -> tuple[BlockStepState, Any]:
         # The rebuild sits between base steps and outside the checkpointed base
         # step: the carry is a scan residual either way, so keeping the rebuilt
         # topology in it costs no extra memory, while putting the rebuild inside
         # the remat would recompute a whole traversal per step in the backward.
         if rebuild_fn is not None:
             carry = rebuild(carry)
-        return step(carry), None
+        carry = step(carry)
+        return carry, (None if record_fn is None else record_fn(carry))
 
-    final, _ = jax.lax.scan(body, state, xs=None, length=n_base)
-    return final
+    final, records = jax.lax.scan(body, state, xs=None, length=n_base)
+    if record_fn is None:
+        return final
+    return final, records
+
+
+def shooting_node(
+    positions: Vec3,
+    velocities: Vec3,
+    masses: PerParticle,
+    force: MutualForceModel,
+    *,
+    k_max: int,
+    dt_max: ScalarLike,
+    eta: float = 0.1,
+    eps: float = 1.0,
+    base_index: int | IntScalar = 0,
+    time: Any = None,
+    args: object = None,
+    topology: Any = None,
+    rebuild_fn: Callable[[Vec3, PerParticle], Any] | None = None,
+) -> BlockStepState:
+    """Project free boundary variables ``(positions, velocities)`` onto a valid state.
+
+    A multiple-shooting formulation holds the state at each segment boundary as
+    an optimization variable and integrates every segment from its node with
+    :func:`block_kdk_rollout`. Two of :class:`~nornax.state.BlockStepState`'s
+    leaves must **not** be free variables there, which is what this constructor
+    enforces by recomputing them:
+
+    * ``acc`` is *derived* from ``positions``/``masses``. Held as an independent
+      variable it adds ``3N`` dimensions the matching constraint does not pin,
+      and -- worse -- the rung assignment at the node reads it, so the optimizer
+      could move the schedule by moving a quantity that is not physical.
+    * ``rung`` is ``int32`` and severed from the gradient; it is recomputed from
+      the recomputed ``acc`` with the segment's own ``dt_max``/``eta``/``eps``,
+      the same call a rollout makes at every base-step boundary.
+
+    The node's topology is built here when ``rebuild_fn`` is given (or taken
+    from ``topology``), severed from the gradient exactly as the rollout severs
+    its rebuilds, and the full acceleration is evaluated against it in one
+    call. A rollout entered from the node uses that topology without re-seeding,
+    so a segment of ``rebuild_every = n_base`` steps runs on the node's tree --
+    the intervalwise-constant mesh of Hesse §5.3 that decision D-006 aligns
+    segment boundaries and rebuilds on. ``base_index`` anchors the rollout's
+    rebuild cadence to the global step count; ``time`` seeds the optional time
+    leaf.
+
+    The matching residual that goes with this projection is
+    :func:`shooting_defect`, on ``(positions, velocities)`` only. Nothing here
+    claims anything about the convergence of a shooting solve; this makes it
+    expressible.
+    """
+    positions = jnp.asarray(positions)
+    velocities = jnp.asarray(velocities)
+    masses = jnp.asarray(masses)
+    n = int(positions.shape[0])
+    if topology is None and rebuild_fn is not None:
+        topology = jax.lax.stop_gradient(rebuild_fn(positions, masses))
+    topo_kw = {} if topology is None else {"topology": topology}
+    # The full force in one evaluation: with every particle on rung 0 all pairs
+    # sit on level 0, whatever the backend's partition.
+    zero_rung = jnp.zeros(n, dtype=jnp.int32)
+    acc = force.level_accelerations(
+        positions, masses, rung=zero_rung, level=0, args=args, **topo_kw
+    )
+    rung = assign_rungs(acc, dt_max=dt_max, k_max=k_max, eta=eta, eps=eps)
+    return BlockStepState(
+        positions=positions,
+        velocities=velocities,
+        masses=masses,
+        acc=acc,
+        rung=rung,
+        base_index=jnp.asarray(base_index, dtype=jnp.int32),
+        topology=topology,
+        time=None if time is None else jnp.asarray(time, dtype=positions.dtype),
+    )
+
+
+def shooting_defect(
+    segment_end: BlockStepState, next_node: BlockStepState
+) -> tuple[Vec3, Vec3]:
+    """The matching residual between a segment's end and the next node.
+
+    Returns ``(next_node.positions - segment_end.positions,
+    next_node.velocities - segment_end.velocities)``: the constraint is on the
+    free variables **only**. ``acc``, ``rung``, ``topology`` and ``time`` are
+    never matched -- the first three are derived or discrete and are recomputed
+    by :func:`shooting_node`, and ``time`` is fixed by the segment grid. A
+    shooting solve drives these two residuals to zero; when they are zero the
+    chained segments are one trajectory of the same map.
+    """
+    return (
+        next_node.positions - segment_end.positions,
+        next_node.velocities - segment_end.velocities,
+    )

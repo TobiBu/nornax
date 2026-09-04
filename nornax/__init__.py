@@ -44,6 +44,8 @@ from .solvers import (  # noqa: E402
     initialize_block_state,
     leapfrog_kdk_rollout,
     leapfrog_kdk_step,
+    shooting_defect,
+    shooting_node,
 )
 from .state import BlockStepState, ForceDerivatives, NBodyState  # noqa: E402
 
@@ -72,6 +74,8 @@ __all__ = [
     "leapfrog_kdk_step",
     "sample_hernquist_sphere",
     "sample_plummer_sphere",
+    "shooting_defect",
+    "shooting_node",
     "solve_adaptive_to_time",
     "solve_adaptive_hermite4",
     "solve_adaptive_hermite4_to_time",
