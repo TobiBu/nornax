@@ -74,6 +74,16 @@ class BlockStepState(NamedTuple):
     are unchanged. Like ``rung`` it is discrete bookkeeping: the rollout severs
     whatever ``rebuild_fn`` returns from the gradient, and the numeric leaves keep
     the exact fixed-topology gradient (see the rollout's docstring and D-006).
+
+    ``time`` is the optional eighth leaf, also ``None`` (empty) by default. The
+    derived-from-counters time above is exact for self-gravity with one
+    ``dt_max``; a segment grid with unequal ``dt_max`` per segment, or a
+    time-dependent external term, needs a physical time the integrator carries.
+    When ``time`` is set, every step advances it by its own ``dt`` (a base step by
+    ``dt_max``, a single-rung step by ``dt``); nothing in the package reads it
+    yet. It is a numeric leaf and is *not* severed from the gradient -- a
+    cotangent through it is zero because nothing depends on it, not because it
+    is stopped.
     """
 
     positions: Vec3
@@ -83,6 +93,7 @@ class BlockStepState(NamedTuple):
     rung: IntPerParticle
     base_index: IntScalar
     topology: Any = None
+    time: Any = None
 
     @property
     def n_particles(self) -> int:
