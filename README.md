@@ -113,7 +113,7 @@ result = solve_adaptive_to_time(
 Notes:
 
 - for Hermite-4 (`order=4`), the adapter uses the `jaccpot` jerk kernel and the
-  `jerk_mode` / `jerk_fd_dt` options apply
+  `jerk_mode` option applies
 - for Hermite-6/8 (`order=6|8`), it uses the higher time-derivative kernel; use
   a `jaccpot` FMM expansion `max_order` high enough for accurate snap/crackle
 - `jaccpot` provides time derivatives up to crackle, so Hermite-8 is the
