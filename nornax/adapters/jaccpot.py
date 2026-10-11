@@ -35,7 +35,6 @@ class JaccpotOptions:
     jit_traversal: bool | None = None
     reuse_prepared_state: bool = False
     jerk_mode: str = "accurate"
-    jerk_fd_dt: float = 1.0e-3
 
     def to_kwargs(self) -> dict[str, Any]:
         """Convert options to runtime kwargs, dropping ``None`` entries."""
@@ -139,11 +138,10 @@ class JaccpotForceModel:
     def _drop_jerk_options(runtime_kwargs: Mapping[str, Any]) -> dict[str, Any]:
         """Drop jerk-only options for calls that do not accept them.
 
-        ``jerk_mode`` and ``jerk_fd_dt`` are only valid for
-        ``compute_accelerations_and_jerk``; the acceleration-only and
-        time-derivative calls reject them.
+        ``jerk_mode`` is only valid for ``compute_accelerations_and_jerk``; the
+        acceleration-only and time-derivative calls reject it.
         """
-        jerk_only = {"jerk_mode", "jerk_fd_dt"}
+        jerk_only = {"jerk_mode"}
         return {
             key: value for key, value in runtime_kwargs.items() if key not in jerk_only
         }

@@ -122,7 +122,6 @@ def test_jaccpot_adapter_supports_snap_for_hermite6() -> None:
     assert kwargs["mode"] == "accurate"
     # jerk-only options must not leak into the time-derivative call.
     assert "jerk_mode" not in kwargs
-    assert "jerk_fd_dt" not in kwargs
 
 
 def test_jaccpot_adapter_supports_crackle_for_hermite8() -> None:
