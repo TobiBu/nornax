@@ -17,7 +17,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from nornax._typing import IntPerParticle, PerParticle, ScalarLike, Vec3
+from nornax._typing import IntPerParticle, IntScalar, PerParticle, ScalarLike, Vec3
 from nornax.blockstep.rungs import assign_rungs
 from nornax.blockstep.schedule import (
     active_level_floor,
