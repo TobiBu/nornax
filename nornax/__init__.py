@@ -45,6 +45,7 @@ from .solvers import (  # noqa: E402
     initialize_block_state,
     leapfrog_kdk_rollout,
     leapfrog_kdk_step,
+    retry_segment,
     shooting_defect,
     shooting_node,
 )
@@ -74,6 +75,7 @@ __all__ = [
     "initialize_state",
     "leapfrog_kdk_rollout",
     "leapfrog_kdk_step",
+    "retry_segment",
     "sample_hernquist_sphere",
     "sample_plummer_sphere",
     "shooting_defect",
