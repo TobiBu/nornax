@@ -85,10 +85,12 @@ class BlockStepState(NamedTuple):
     ``dt_max``; a segment grid with unequal ``dt_max`` per segment, or a
     time-dependent external term, needs a physical time the integrator carries.
     When ``time`` is set, every step advances it by its own ``dt`` (a base step by
-    ``dt_max``, a single-rung step by ``dt``); nothing in the package reads it
-    yet. It is a numeric leaf and is *not* severed from the gradient -- a
-    cotangent through it is zero because nothing depends on it, not because it
-    is stopped.
+    ``dt_max``, a single-rung step by ``dt``). The integrators' external field
+    reads it (``external_fn(positions, time, external_args)``, at the instant of
+    each evaluation; see :mod:`nornax.solvers.leapfrog_kdk`); nothing else does.
+    It is a numeric leaf and is *not* severed from the gradient: through a
+    time-dependent field a cotangent reaches it, and otherwise it is zero because
+    nothing depends on it, not because it is stopped.
     """
 
     positions: Vec3
