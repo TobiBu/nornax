@@ -74,6 +74,11 @@ class BlockStepState(NamedTuple):
     are unchanged. Like ``rung`` it is discrete bookkeeping: the rollout severs
     whatever ``rebuild_fn`` returns from the gradient, and the numeric leaves keep
     the exact fixed-topology gradient (see the rollout's docstring and D-006).
+    :func:`~nornax.solvers.leapfrog_kdk.leapfrog_kdk_rollout` carries it the same
+    way, rebuilt before a step's force evaluation. For a
+    :class:`~nornax.forces.base.RebuildingForceModel` (a backend that rebuilds at
+    every evaluation, jaccpot's fused provider) the leaf holds instead the small
+    value the model hands from one evaluation to the next.
 
     ``time`` is the optional eighth leaf, also ``None`` (empty) by default. The
     derived-from-counters time above is exact for self-gravity with one

@@ -26,7 +26,11 @@ from nornax.blockstep.schedule import (
     n_sub,
     stride,
 )
-from nornax.forces.base import FusedMutualForceModel, MutualForceModel
+from nornax.forces.base import (
+    FusedMutualForceModel,
+    MutualForceModel,
+    RebuildingForceModel,
+)
 from nornax.state import BlockStepState
 
 
@@ -113,16 +117,22 @@ def total_acceleration(
     *,
     k_max: int,
     args: object = None,
+    topology: object = None,
 ) -> Vec3:
     """Return the full acceleration as the sum of every level's contribution.
 
     Levels ``0 .. k_max`` partition all interactions, so their antisymmetric
     contributions add up to the total acceleration on every particle.
+    ``topology`` is passed on as the explicit keyword only when it is not
+    ``None`` (see :class:`~nornax.forces.base.MutualForceModel`).
     """
-    acc = force.level_accelerations(positions, masses, rung=rung, level=0, args=args)
+    topo_kw = {} if topology is None else {"topology": topology}
+    acc = force.level_accelerations(
+        positions, masses, rung=rung, level=0, args=args, **topo_kw
+    )
     for k in range(1, k_max + 1):
         acc = acc + force.level_accelerations(
-            positions, masses, rung=rung, level=k, args=args
+            positions, masses, rung=rung, level=k, args=args, **topo_kw
         )
     return acc
 
@@ -134,6 +144,45 @@ def _advance_time(time: Any, dt: Any) -> Any:
     return time + dt
 
 
+def _single_rung_acceleration(
+    force: MutualForceModel,
+    positions: Vec3,
+    masses: PerParticle,
+    rung: IntPerParticle,
+    *,
+    args: object,
+    topology: Any,
+) -> tuple[Vec3, Any]:
+    """The full self-gravity at ``positions`` and the topology to carry on.
+
+    A :class:`~nornax.forces.base.RebuildingForceModel` rebuilds itself and
+    returns the value to carry; any other model is evaluated against
+    ``topology`` (passed only when not ``None``), which it carries unchanged.
+    """
+    if isinstance(force, RebuildingForceModel):
+        return force.rebuild_accelerations(
+            positions, masses, topology=topology, args=args
+        )
+    acc = total_acceleration(
+        force, positions, masses, rung, k_max=0, args=args, topology=topology
+    )
+    return acc, topology
+
+
+def _refuse_rebuilding_model(force: MutualForceModel, where: str) -> None:
+    """Raise when a single-rung :class:`RebuildingForceModel` reaches the block scheme.
+
+    Its value to carry (jaccpot's capacity verdict among it) would be dropped at
+    every boundary, and its evaluation cannot be split by level.
+    """
+    if isinstance(force, RebuildingForceModel):
+        raise TypeError(
+            f"{type(force).__name__} is a RebuildingForceModel: a single-rung force "
+            f"that rebuilds itself at every evaluation, which {where} cannot split "
+            "by level or carry. Use leapfrog_kdk_rollout."
+        )
+
+
 def initialize_block_state(
     positions: Vec3,
     velocities: Vec3,
@@ -143,17 +192,46 @@ def initialize_block_state(
     k_max: int = 0,
     rung: IntPerParticle | None = None,
     args: object = None,
+    topology: Any = None,
+    rebuild_fn: Callable[[Vec3, PerParticle], Any] | None = None,
 ) -> BlockStepState:
     """Build a ``BlockStepState`` with its acceleration cache populated.
 
     With no ``rung`` supplied every particle starts on rung 0 (the single-rung
     reduced case). The cached ``acc`` is the acceleration at ``positions``, which
     seeds the opening half-kick of the first step.
+
+    ``topology`` is the structure the state starts with; when it is
+    ``None`` and ``rebuild_fn`` is given, it is built here from ``positions``
+    (severed from the gradient, as the rollouts sever their rebuilds), and the
+    acceleration is evaluated against it. A
+    :class:`~nornax.forces.base.RebuildingForceModel` instead rebuilds itself:
+    ``topology`` is then the value its first evaluation starts from, and the
+    state carries what that evaluation returns. With all of them left at their
+    defaults the state is the one built before they existed.
+
+    Raises ``ValueError`` for a rebuilding model with ``k_max != 0`` or with a
+    ``rebuild_fn``.
     """
     n = positions.shape[0]
     if rung is None:
         rung = jnp.zeros(n, dtype=jnp.int32)
-    acc = total_acceleration(force, positions, masses, rung, k_max=k_max, args=args)
+    if isinstance(force, RebuildingForceModel):
+        if int(k_max) != 0 or rebuild_fn is not None:
+            raise ValueError(
+                "a RebuildingForceModel is single-rung and rebuilds itself: "
+                f"k_max must be 0 and rebuild_fn None (got k_max={k_max}, "
+                f"rebuild_fn={rebuild_fn!r})"
+            )
+        acc, topology = force.rebuild_accelerations(
+            positions, masses, topology=topology, args=args
+        )
+    else:
+        if topology is None and rebuild_fn is not None:
+            topology = jax.lax.stop_gradient(rebuild_fn(positions, masses))
+        acc = total_acceleration(
+            force, positions, masses, rung, k_max=k_max, args=args, topology=topology
+        )
     return BlockStepState(
         positions=positions,
         velocities=velocities,
@@ -161,6 +239,40 @@ def initialize_block_state(
         acc=acc,
         rung=rung,
         base_index=jnp.asarray(0, dtype=jnp.int32),
+        topology=topology,
+    )
+
+
+def _kick_drift(state: BlockStepState, dt: Any) -> tuple[Vec3, Vec3]:
+    """The opening half-kick from the cached ``acc`` and the full drift."""
+    v_half = state.velocities + 0.5 * dt * state.acc
+    x_new = state.positions + dt * v_half
+    return v_half, x_new
+
+
+def _force_kick(
+    state: BlockStepState,
+    dt: Any,
+    force: MutualForceModel,
+    positions: Vec3,
+    v_half: Vec3,
+    topology: Any,
+    *,
+    args: object,
+) -> BlockStepState:
+    """The force at the drifted ``positions`` and the closing half-kick."""
+    acc, topology = _single_rung_acceleration(
+        force, positions, state.masses, state.rung, args=args, topology=topology
+    )
+    return BlockStepState(
+        positions=positions,
+        velocities=v_half + 0.5 * dt * acc,
+        masses=state.masses,
+        acc=acc,
+        rung=state.rung,
+        base_index=state.base_index + 1,
+        topology=topology,
+        time=_advance_time(state.time, dt),
     )
 
 
@@ -178,24 +290,41 @@ def leapfrog_kdk_step(
     half-kick. This is the kick-combined form: one force evaluation per step, and
     the cached acceleration is exactly the field the next step's opening kick
     needs.
+
+    A carried ``state.topology`` reaches the force as the explicit ``topology=``
+    keyword, and only when there is one (the contract of
+    :func:`advance_base_step`); a
+    :class:`~nornax.forces.base.RebuildingForceModel` rebuilds at the new
+    positions and the step carries the value it returns.
     """
     dt = jnp.asarray(dt, dtype=state.positions.dtype)
-    v_half = state.velocities + 0.5 * dt * state.acc
-    x_new = state.positions + dt * v_half
-    a_new = total_acceleration(
-        force, x_new, state.masses, state.rung, k_max=0, args=args
+    v_half, x_new = _kick_drift(state, dt)
+    return _force_kick(
+        state,
+        dt,
+        force,
+        x_new,
+        v_half,
+        state.topology,
+        args=args,
     )
-    v_new = v_half + 0.5 * dt * a_new
-    return BlockStepState(
-        positions=x_new,
-        velocities=v_new,
-        masses=state.masses,
-        acc=a_new,
-        rung=state.rung,
-        base_index=state.base_index + 1,
-        topology=state.topology,
-        time=_advance_time(state.time, dt),
-    )
+
+
+def _check_cadence(rebuild_fn: Any, rebuild_every: Any) -> int:
+    """Validate a rebuild cadence; return it as an ``int``.
+
+    Raises ``ValueError`` when ``rebuild_every`` is not a positive integer, or is
+    not ``1`` while ``rebuild_fn`` is ``None`` (a cadence with nothing to run).
+    """
+    rebuild_every = int(rebuild_every)
+    if rebuild_every < 1:
+        raise ValueError(f"rebuild_every must be >= 1; got {rebuild_every}")
+    if rebuild_fn is None and rebuild_every != 1:
+        raise ValueError(
+            "rebuild_every has no effect without rebuild_fn; pass the traceable "
+            "(positions, masses) -> topology rebuild to set a cadence"
+        )
+    return rebuild_every
 
 
 def leapfrog_kdk_rollout(
@@ -205,20 +334,105 @@ def leapfrog_kdk_rollout(
     *,
     n_steps: int,
     args: object = None,
-) -> BlockStepState:
+    checkpoint: bool = False,
+    topology: Any = None,
+    rebuild_fn: Callable[[Vec3, PerParticle], Any] | None = None,
+    rebuild_every: int = 1,
+    record_fn: Callable[[BlockStepState], Any] | None = None,
+) -> BlockStepState | tuple[BlockStepState, Any]:
     """Roll out ``n_steps`` single-rung KDK steps with a fixed-length ``lax.scan``.
 
     The step count is static, so the scan traces once and runs entirely on device.
-    Gradient checkpointing is added in a later step; this rollout is already fully
-    differentiable through the continuous kick/drift arithmetic.
+    Every step reuses the cached ``state.acc`` for its opening half-kick, so the
+    rollout costs exactly one force evaluation per step (a block rollout at
+    ``k_max = 0`` costs two on the per-level path and three on the fused one: it
+    re-evaluates the opening kick's field, and the fused path adds the end-of-step
+    total). The rollout is fully differentiable through the continuous kick/drift
+    arithmetic.
+
+    The hooks are those of :func:`block_kdk_rollout`, placed for a step that has
+    one evaluation, at its end:
+
+    * ``topology`` is the structure in force at entry (default
+      ``state.topology``; when neither is present but ``rebuild_fn`` is, it is
+      built from the entry positions before the scan).
+    * ``rebuild_fn(positions, masses) -> topology`` runs **after the drift and
+      before the force**, at the positions the force is evaluated at, for every
+      step that ends on a ``base_index`` that is a multiple of ``rebuild_every``
+      (``1``: every evaluation sees a fresh structure; ``k``: one structure
+      serves ``k`` evaluations). The cadence is anchored on ``base_index``, so a
+      resumed rollout keeps it. What it returns is severed from the gradient.
+    * ``record_fn(state) -> pytree`` is called on the state after every step and
+      the records are stacked along a leading ``n_steps`` axis; the rollout then
+      returns ``(final, records)``, ``final`` alone otherwise.
+    * ``checkpoint`` wraps each step's force evaluation and closing kick in
+      ``jax.checkpoint`` (off by default here, unlike the block rollout, so the
+      default program is the one it always was): the backward pass recomputes a
+      step's force instead of storing it. The rebuild stays outside the remat, so
+      the backward never repeats a traversal.
+
+    The carried topology reaches the force as the explicit ``topology=`` keyword,
+    and only when one is carried: with every hook at its default each call is
+    the one made before the hooks existed. A
+    :class:`~nornax.forces.base.RebuildingForceModel` (jaccpot's fused provider)
+    rebuilds itself at every evaluation and carries only the small value it
+    returns; it takes no ``rebuild_fn``.
+
+    Raises ``ValueError`` on an invalid cadence (see :func:`block_kdk_rollout`)
+    and for a ``rebuild_fn`` given with a rebuilding model.
     """
     dt = jnp.asarray(dt, dtype=state.positions.dtype)
+    rebuild_every = _check_cadence(rebuild_fn, rebuild_every)
+    if rebuild_fn is not None and isinstance(force, RebuildingForceModel):
+        raise ValueError(
+            f"{type(force).__name__} rebuilds itself at every evaluation; it takes "
+            "no rebuild_fn"
+        )
+    if topology is None:
+        topology = state.topology
+    if topology is None and rebuild_fn is not None:
+        # Seed at entry so the carry has the structure the rebuild returns.
+        topology = jax.lax.stop_gradient(rebuild_fn(state.positions, state.masses))
+    state = state._replace(topology=topology)
 
-    def body(carry: BlockStepState, _: None) -> tuple[BlockStepState, None]:
-        return leapfrog_kdk_step(carry, dt, force, args=args), None
+    def rebuild(positions: Vec3, masses: PerParticle, index: Any, current: Any) -> Any:
+        """The structure the force at ``positions`` (step ``index``) is evaluated on."""
+        assert rebuild_fn is not None
 
-    final, _ = jax.lax.scan(body, state, xs=None, length=n_steps)
-    return final
+        def fresh() -> Any:
+            return jax.lax.stop_gradient(rebuild_fn(positions, masses))
+
+        if rebuild_every == 1:
+            return fresh()
+        return jax.lax.cond(index % rebuild_every == 0, fresh, lambda: current)
+
+    def close(
+        carry: BlockStepState, positions: Vec3, v_half: Vec3, structure: Any
+    ) -> BlockStepState:
+        return _force_kick(
+            carry,
+            dt,
+            force,
+            positions,
+            v_half,
+            structure,
+            args=args,
+        )
+
+    close_fn = jax.checkpoint(close) if checkpoint else close
+
+    def body(carry: BlockStepState, _: None) -> tuple[BlockStepState, Any]:
+        v_half, x_new = _kick_drift(carry, dt)
+        structure = carry.topology
+        if rebuild_fn is not None:
+            structure = rebuild(x_new, carry.masses, carry.base_index + 1, structure)
+        carry = close_fn(carry, x_new, v_half, structure)
+        return carry, (None if record_fn is None else record_fn(carry))
+
+    final, records = jax.lax.scan(body, state, xs=None, length=n_steps)
+    if record_fn is None:
+        return final
+    return final, records
 
 
 def advance_base_step(
@@ -293,7 +507,11 @@ def advance_base_step(
     :class:`~nornax.forces.base.MutualForceModel`), the *same* value at every
     boundary: this function never rebuilds it. A state without a topology is
     stepped with exactly the calls made before the keyword existed.
+
+    Raises ``TypeError`` for a
+    :class:`~nornax.forces.base.RebuildingForceModel` (single-rung).
     """
+    _refuse_rebuilding_model(force, "advance_base_step")
     dt_max = jnp.asarray(dt_max, dtype=state.positions.dtype)
     ns = n_sub(k_max)
     # Passed only when carried, so a model that predates the keyword -- or a
@@ -563,14 +781,7 @@ def block_kdk_rollout(
     not ``1`` while ``rebuild_fn`` is ``None`` (a cadence with nothing to run).
     """
     dt_max = jnp.asarray(dt_max, dtype=state.positions.dtype)
-    rebuild_every = int(rebuild_every)
-    if rebuild_every < 1:
-        raise ValueError(f"rebuild_every must be >= 1; got {rebuild_every}")
-    if rebuild_fn is None and rebuild_every != 1:
-        raise ValueError(
-            "rebuild_every has no effect without rebuild_fn; pass the traceable "
-            "(positions, masses) -> topology rebuild to set a cadence"
-        )
+    rebuild_every = _check_cadence(rebuild_fn, rebuild_every)
 
     if topology is None:
         topology = state.topology
