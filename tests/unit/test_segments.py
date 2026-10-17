@@ -168,7 +168,8 @@ def test_a_segment_that_fits_runs_once():
 
 def test_a_donating_segment_is_rerun_from_a_kept_copy_of_its_start():
     """``donates=True``: the start state is consumed by the failed attempt, and the
-    re-plan and re-run see a copy of it, bit for bit."""
+    re-plan and re-run see a copy of it, bit for bit -- all but the cached
+    acceleration, which the re-plan evaluates again and the driver does not keep."""
     positions, velocities, masses = _expanding()
     roomy = _Capped(capacity=100.0)
     want, _ = _run(roomy, _start(roomy, positions, velocities, masses))
@@ -194,5 +195,6 @@ def test_a_donating_segment_is_rerun_from_a_kept_copy_of_its_start():
     assert got.retries == 1
     assert jnp.array_equal(starts[0].positions, positions)
     assert jnp.array_equal(starts[0].velocities, velocities)
+    assert starts[0].acc is None
     for name in ("positions", "velocities", "acc", "base_index"):
         assert jnp.array_equal(getattr(got.state, name), getattr(want, name)), name
