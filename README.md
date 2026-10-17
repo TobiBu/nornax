@@ -172,9 +172,11 @@ for _ in range(n_segments):
 
 `halo(positions, time, args)` is an optional external acceleration, added at
 every force evaluation (in the block scheme, kicked on each particle's own
-rung). The rollout is jaccpot's `strict_run_v2(carry="particles")` up to the
-update formula's rounding: the same forces, kick-drift-kick instead of velocity
-Verlet arithmetic (`tests/integration/test_jaccpot_provider_rollout.py`).
+rung). The single-rung step is the kick-drift-kick leapfrog written in jaccpot's
+velocity-Verlet expressions, so the rollout is `strict_run_v2(carry="particles")`
+and jaccpot's production runner bit for bit (with an external field on CPU, XLA
+rounds a few velocity components 1 ulp apart;
+`tests/integration/test_jaccpot_provider_rollout.py`).
 
 ## Planned Architecture
 

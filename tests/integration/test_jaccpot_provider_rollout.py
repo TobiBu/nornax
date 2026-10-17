@@ -5,18 +5,17 @@ the pure-JAX near field, cell leaves, ``jax.default_backend`` reporting
 ``"gpu"``). Skipped when jaccpot is not importable, as the adapter smoke test is.
 
 * ``leapfrog_kdk_rollout`` with :class:`~nornax.adapters.jaccpot.FusedProviderForce`
-  IS a caller's KDK scan over ``provider.step``, bit for bit: the adapter adds no
-  arithmetic, and the start state's force is the lane's start force;
-* against ``strict_run_v2(carry="particles")`` the forces are the lane's and only
-  the update formula differs: nornax kicks ``v + (0.5 dt) a`` and drifts with the
-  half-kicked velocity (kick-drift-kick), the lane writes velocity Verlet,
-  ``x + v dt + 0.5 a dt^2`` and ``v + 0.5 (a + a') dt``. Same map, different
-  association: after three steps the positions and velocities agree to 4 float64
-  ulps of their largest magnitude (measured 2026-10-17: 844 of 1536 position and
-  628 of 1536 velocity components differ, by at most 1.9e-16 and 2.2e-16 of the
-  largest; small components are further off in their own ulps), and the last
-  step's self-gravity is the lane's bit for bit -- the float32 force saw the same
-  positions. An external field changes nothing in that;
+  IS a caller's velocity-Verlet scan over ``provider.step``, bit for bit: the
+  adapter adds no arithmetic, and the start state's force is the lane's start
+  force;
+* it IS ``strict_run_v2(carry="particles")`` and the production runner (two
+  segments of two steps), bit for bit, over four steps: nornax's single-rung step
+  writes the lane's velocity-Verlet expressions operand for operand. With an
+  external field the positions and forces stay bitwise and XLA rounds the fused
+  velocity update of a few components differently (measured 2026-10-17, CPU: 1
+  of 1536 velocity components after four steps, by 1 ulp of its value; the field
+  itself is bitwise on the same positions; the A100 at 2e5 is bitwise), so that
+  case is pinned to 2 ulps of each component;
 * a segment whose walk overflows (caps validated on a configuration with fewer
   pairs) is re-planned through the lane's policy and re-run from its start by
   :func:`~nornax.solvers.segments.retry_segment`, and equals a run prepared on the
@@ -40,7 +39,7 @@ from nornax.solvers.segments import retry_segment  # noqa: E402
 
 N = 512
 LEAF, ORDER, THETA = 16, 4, 0.6
-SOFTENING, DT, STEPS = 1e-2, 1e-3, 3
+SOFTENING, DT, STEPS = 1e-2, 1e-3, 4
 
 #: the fused lane's switches and sizing knobs: unset, the library defaults run
 _ENV_UNSET = (
@@ -172,7 +171,7 @@ def nornax_run(request, plummer):
     )
 
 
-def test_the_rollout_is_a_kdk_scan_over_the_providers_step(nornax_run):
+def test_the_rollout_is_a_verlet_scan_over_the_providers_step(nornax_run):
     """The adapter adds no arithmetic: a caller's own scan gives the same bits."""
     prov, x, v, m = (nornax_run[k] for k in ("prov", "x", "v", "m"))
     external = nornax_run["external"]
@@ -184,16 +183,15 @@ def test_the_rollout_is_a_kdk_scan_over_the_providers_step(nornax_run):
             acc = acc + _halo(x_now, None, _HALO_ARGS)
         return acc, aux
 
-    def kdk(carry, m_now):
+    def verlet(carry, m_now):
         x_now, v_now, a_now, aux = carry
-        v_half = v_now + 0.5 * dt * a_now
-        x_now = x_now + dt * v_half
+        x_now = x_now + v_now * dt + 0.5 * a_now * dt**2
         a_new, aux = total(x_now, m_now, aux)
-        return (x_now, v_half + 0.5 * dt * a_new, a_new, aux), None
+        return (x_now, v_now + 0.5 * (a_now + a_new) * dt, a_new, aux), None
 
     @jax.jit
     def run(carry, m_now):
-        return jax.lax.scan(lambda c, _: kdk(c, m_now), carry, None, length=STEPS)[0]
+        return jax.lax.scan(lambda c, _: verlet(c, m_now), carry, None, length=STEPS)[0]
 
     a0, aux0 = jax.jit(total)(x, m, None)
     s0, final = nornax_run["s0"], nornax_run["final"]
@@ -207,16 +205,19 @@ def test_the_rollout_is_a_kdk_scan_over_the_providers_step(nornax_run):
     assert int(final.base_index) == STEPS
 
 
-def test_against_the_particle_carry_only_the_update_formula_differs(nornax_run):
-    """``strict_run_v2(carry="particles")`` to 4 ulps of the state, the same force."""
+def test_the_rollout_is_the_particle_carry_and_the_runner(nornax_run):
+    """``strict_run_v2(carry="particles")`` and ``ProductionRunner``, bit for bit."""
+    from jaccpot.production import GalaxySettings, ProductionRunner, SegmentConfig
+
     x, v, m = (nornax_run[k] for k in ("x", "v", "m"))
-    kw = {}
+    field, kw = None, {}
     if nornax_run["external"]:
-        kw = dict(
-            add_external=True,
-            external_acceleration_fn=lambda rows: _halo(rows[:, 0], None, _HALO_ARGS),
-        )
-    want, handle, _ = _solver().strict_run_v2(
+
+        def field(rows):
+            return _halo(rows[:, 0], None, _HALO_ARGS)
+
+        kw = dict(add_external=True, external_acceleration_fn=field)
+    lane, handle, _ = _solver().strict_run_v2(
         state=jnp.stack([x, v], axis=1),
         masses=m,
         dt=DT,
@@ -229,14 +230,23 @@ def test_against_the_particle_carry_only_the_update_formula_differs(nornax_run):
         carry="particles",
         **kw,
     )
+    runner = ProductionRunner(
+        _solver(),
+        settings=GalaxySettings(leaf_size=LEAF, max_order=ORDER, theta=THETA),
+        segment=SegmentConfig(steps=2, traced_params=False, diagnostics_every=0),
+        external_acceleration_fn=field,
+    )
+    ran = runner.run(jnp.stack([x, v], axis=1), m, dt=DT, num_steps=STEPS).state
     final = nornax_run["final"]
-    eps = float(np.finfo(np.float64).eps)
-    for i, got in enumerate((final.positions, final.velocities)):
-        got, ref = np.asarray(got), np.asarray(want)[:, i]
-        worst = float(np.max(np.abs(got - ref)))
-        assert worst <= 4 * eps * float(np.max(np.abs(ref))), (i, worst)
+    for want in (lane, ran):
+        want = np.asarray(want)
+        assert _differ(final.positions, want[:, 0]) == 0
+        if nornax_run["external"]:
+            got, ref = np.asarray(final.velocities), want[:, 1]
+            assert np.all(np.abs(got - ref) <= 2 * np.spacing(np.abs(ref)))
+        else:
+            assert _differ(final.velocities, want[:, 1]) == 0
     if not nornax_run["external"]:
-        # the lane's self-gravity at its final positions, bit for bit
         assert _differ(final.acc, handle.self_acceleration) == 0
 
 
