@@ -129,7 +129,7 @@ def main() -> int:
     H._event("before_prepare")
     t0 = time.perf_counter()
     # the particle carry's bootstrap: a caps-only prepare (the runner's)
-    prov, _ = FusedForceProvider.prepare(
+    prov = FusedForceProvider.prepare(
         solver,
         x0,
         m,
@@ -137,7 +137,9 @@ def main() -> int:
         max_order=args.order,
         theta=args.theta,
         caps_only=True,
-    )
+    )[
+        0
+    ]  # the eager topology (the eager tree) is dropped, as the runner drops it
     force = FusedProviderForce(prov)
     state = force.initial_state(x0, v0, m, args=params, external_fn=external_fn)
     jax.block_until_ready(state.acc)

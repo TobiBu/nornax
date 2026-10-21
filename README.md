@@ -137,9 +137,9 @@ from nornax import leapfrog_kdk_rollout, retry_segment
 from nornax.adapters import FusedProviderForce
 
 solver = FastMultipoleMethod(preset="galaxy", softening=1.5e-3)
-prov, _ = FusedForceProvider.prepare(
+prov = FusedForceProvider.prepare(
     solver, x0, m, leaf_size=64, max_order=6, caps_only=True
-)
+)[0]  # no reference to the eager topology: it holds the eager tree
 force = FusedProviderForce(prov)
 state = force.initial_state(x0, v0, m, time=0.0, external_fn=halo, external_args=p)
 

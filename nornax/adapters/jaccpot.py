@@ -182,9 +182,9 @@ class FusedProviderForce:
 
     Make the provider eagerly, then use this inside jitted programs::
 
-        prov, _ = FusedForceProvider.prepare(
+        prov = FusedForceProvider.prepare(
             solver, x0, m, leaf_size=64, max_order=6, caps_only=True
-        )
+        )[0]  # keep no reference to the eager topology: it holds the eager tree
         force = FusedProviderForce(prov)
         state = force.initial_state(x0, v0, m)  # the start force, jitted
         segment = jax.jit(
@@ -287,8 +287,16 @@ class FusedProviderForce:
         seeds ``dehnen_error``'s first rebuild (the f_b of
         ``provider.accelerations(topology, force_scale=True)`` on a full prepare's
         topology); it is required then and ignored otherwise.
+
+        It first clears the engine's prepared-state cache
+        (``clear_prepared_state_cache``), as the runner does before its scan: the
+        eager prepare's topology-reuse entry holds the eager tree, which nothing
+        after it reads -- the steps rebuild from the template -- and would stay
+        alive through the whole run (about 50 bytes per particle).
         """
         from nornax.solvers.leapfrog_kdk import initialize_block_state
+
+        self.provider.engine.clear_prepared_state_cache()
 
         seed = None if force_scale is None else (force_scale, None, None)
 
