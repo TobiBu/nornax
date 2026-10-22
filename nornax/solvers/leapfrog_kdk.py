@@ -2,7 +2,8 @@
 
 This module builds up in the order of the implementation plan. It provides the
 single-rung reduced case (``leapfrog_kdk_step``/``leapfrog_kdk_rollout``, where the
-block scheme collapses to the textbook kick-drift-kick leapfrog) and the multi-rung
+block scheme collapses to the textbook kick-drift-kick leapfrog, written in
+velocity-Verlet form) and the multi-rung
 base step (``advance_base_step``/``block_kdk_base_step``/``block_kdk_rollout``) on
 the oracle force path. The fast compaction path and gradient checkpointing are
 layered on in later steps.
@@ -281,11 +282,13 @@ def initialize_block_state(
     )
 
 
-def _kick_drift(state: BlockStepState, dt: Any) -> tuple[Vec3, Vec3]:
-    """The opening half-kick from the cached ``acc`` and the full drift."""
-    v_half = state.velocities + 0.5 * dt * state.acc
-    x_new = state.positions + dt * v_half
-    return v_half, x_new
+def _drift(state: BlockStepState, dt: Any) -> Vec3:
+    """The positions after the opening half-kick and the full drift.
+
+    ``x + v dt + 0.5 a dt**2`` with the cached ``a``: jaccpot's fused runner's
+    expression, operand for operand (see :func:`leapfrog_kdk_step`).
+    """
+    return state.positions + state.velocities * dt + 0.5 * state.acc * dt**2
 
 
 def _force_kick(
@@ -293,14 +296,17 @@ def _force_kick(
     dt: Any,
     force: MutualForceModel,
     positions: Vec3,
-    v_half: Vec3,
     topology: Any,
     *,
     args: object,
     external_fn: ExternalField | None,
     external_args: object,
 ) -> BlockStepState:
-    """The force at the drifted ``positions`` and the closing half-kick."""
+    """The force at the drifted ``positions`` and both half-kicks' velocity.
+
+    ``v + 0.5 (a + a') dt``, with ``a`` the cached acceleration at the step's
+    start and ``a'`` the new one: jaccpot's fused runner's expression.
+    """
     time = _advance_time(state.time, dt)
     acc, topology = _single_rung_acceleration(
         force, positions, state.masses, state.rung, args=args, topology=topology
@@ -309,7 +315,7 @@ def _force_kick(
         acc = acc + _external_acceleration(external_fn, positions, time, external_args)
     return BlockStepState(
         positions=positions,
-        velocities=v_half + 0.5 * dt * acc,
+        velocities=state.velocities + 0.5 * (state.acc + acc) * dt,
         masses=state.masses,
         acc=acc,
         rung=state.rung,
@@ -336,6 +342,17 @@ def leapfrog_kdk_step(
     the cached acceleration is exactly the field the next step's opening kick
     needs.
 
+    The step is that kick-drift-kick leapfrog written in **velocity-Verlet
+    form**: ``x' = x + v dt + 0.5 a dt**2`` and ``v' = v + 0.5 (a + a') dt``,
+    which is the same map in exact arithmetic (the half-kicked velocity
+    ``v + 0.5 dt a`` never appears on its own). The expressions are jaccpot's
+    fused runner's (``strict_run_v2(carry="particles")``,
+    ``fmm_strict_run.py``'s step and ``fmm_state._velocity_verlet_kick_drifted``)
+    in the same operand order and dt products, so XLA sees the same arithmetic:
+    on jaccpot's provider a nornax rollout is that runner bit for bit, and moving
+    a loop between the two moves no bits. The block scheme keeps its kicks and
+    drifts.
+
     A carried ``state.topology`` reaches the force as the explicit ``topology=``
     keyword, and only when there is one (the contract of
     :func:`advance_base_step`); a
@@ -345,13 +362,11 @@ def leapfrog_kdk_step(
     (module docstring).
     """
     dt = jnp.asarray(dt, dtype=state.positions.dtype)
-    v_half, x_new = _kick_drift(state, dt)
     return _force_kick(
         state,
         dt,
         force,
-        x_new,
-        v_half,
+        _drift(state, dt),
         state.topology,
         args=args,
         external_fn=external_fn,
@@ -394,8 +409,9 @@ def leapfrog_kdk_rollout(
     """Roll out ``n_steps`` single-rung KDK steps with a fixed-length ``lax.scan``.
 
     The step count is static, so the scan traces once and runs entirely on device.
-    Every step reuses the cached ``state.acc`` for its opening half-kick, so the
-    rollout costs exactly one force evaluation per step (a block rollout at
+    Every step reuses the cached ``state.acc`` for its opening half-kick (the
+    step is :func:`leapfrog_kdk_step`, velocity-Verlet form), so the rollout
+    costs exactly one force evaluation per step (a block rollout at
     ``k_max = 0`` costs two on the per-level path and three on the fused one: it
     re-evaluates the opening kick's field, and the fused path adds the end-of-step
     total). The rollout is fully differentiable through the continuous kick/drift
@@ -416,7 +432,7 @@ def leapfrog_kdk_rollout(
     * ``record_fn(state) -> pytree`` is called on the state after every step and
       the records are stacked along a leading ``n_steps`` axis; the rollout then
       returns ``(final, records)``, ``final`` alone otherwise.
-    * ``checkpoint`` wraps each step's force evaluation and closing kick in
+    * ``checkpoint`` wraps each step's force evaluation and velocity update in
       ``jax.checkpoint`` (off by default here, unlike the block rollout, so the
       default program is the one it always was): the backward pass recomputes a
       step's force instead of storing it. The rebuild stays outside the remat, so
@@ -458,15 +474,12 @@ def leapfrog_kdk_rollout(
             return fresh()
         return jax.lax.cond(index % rebuild_every == 0, fresh, lambda: current)
 
-    def close(
-        carry: BlockStepState, positions: Vec3, v_half: Vec3, structure: Any
-    ) -> BlockStepState:
+    def close(carry: BlockStepState, positions: Vec3, structure: Any) -> BlockStepState:
         return _force_kick(
             carry,
             dt,
             force,
             positions,
-            v_half,
             structure,
             args=args,
             external_fn=external_fn,
@@ -476,11 +489,11 @@ def leapfrog_kdk_rollout(
     close_fn = jax.checkpoint(close) if checkpoint else close
 
     def body(carry: BlockStepState, _: None) -> tuple[BlockStepState, Any]:
-        v_half, x_new = _kick_drift(carry, dt)
+        x_new = _drift(carry, dt)
         structure = carry.topology
         if rebuild_fn is not None:
             structure = rebuild(x_new, carry.masses, carry.base_index + 1, structure)
-        carry = close_fn(carry, x_new, v_half, structure)
+        carry = close_fn(carry, x_new, structure)
         return carry, (None if record_fn is None else record_fn(carry))
 
     final, records = jax.lax.scan(body, state, xs=None, length=n_steps)

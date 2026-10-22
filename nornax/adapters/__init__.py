@@ -1,5 +1,5 @@
 """Optional backend adapters for sibling projects."""
 
-from .jaccpot import JaccpotForceModel, JaccpotOptions
+from .jaccpot import FusedProviderForce, JaccpotForceModel, JaccpotOptions
 
-__all__ = ["JaccpotForceModel", "JaccpotOptions"]
+__all__ = ["FusedProviderForce", "JaccpotForceModel", "JaccpotOptions"]

@@ -68,8 +68,13 @@ def _host_copy(leaf: jax.Array) -> Any:
 
 
 def _keep(state: BlockStepState) -> tuple[Any, list]:
-    """Host copies of ``state``'s arrays, with the shardings to restore them to."""
-    leaves, treedef = jax.tree.flatten(state)
+    """Host copies of ``state``'s arrays but ``acc``, with their shardings.
+
+    The cached acceleration is left out: ``replan`` evaluates it again with the
+    re-planned force, so a copy would only cost host memory and a transfer (12
+    bytes per particle at float32, of 44).
+    """
+    leaves, treedef = jax.tree.flatten(state._replace(acc=None))
     kept = [
         (_host_copy(x), x.sharding) if isinstance(x, jax.Array) else (x, None)
         for x in leaves
@@ -134,7 +139,9 @@ def retry_segment(
         a large run within one card. The driver then keeps a host copy of each
         attempt's start state (asynchronous, into pinned memory on a GPU) and
         puts it back on the device for a re-plan: the start state ``replan``
-        sees, and the re-run starts from, is bitwise the one that was donated.
+        sees is bitwise the one that was donated, except that its ``acc`` is
+        ``None`` -- not copied, since ``replan`` re-evaluates it for the new
+        force anyway.
 
     Returns
     -------

@@ -119,6 +119,65 @@ Notes:
 - `jaccpot` provides time derivatives up to crackle, so Hermite-8 is the
   highest order the adapter supports
 
+### The fused production lane under the KDK leapfrog
+
+`FusedProviderForce` wraps `jaccpot.FusedForceProvider` -- the per-step force of
+jaccpot's single-GPU production lane (`preset="galaxy"`) -- for
+`leapfrog_kdk_rollout`. Each evaluation rebuilds the tree at the new positions
+and carries only the lane's capacity verdict (and, under `dehnen_error`, its
+force scale) from step to step; `retry_segment` re-plans and re-runs a segment
+whose fixed capacities overflowed, with the lane's own retry policy.
+
+```python
+import functools
+
+import jax
+from jaccpot import FastMultipoleMethod, FusedForceProvider
+from nornax import leapfrog_kdk_rollout, retry_segment
+from nornax.adapters import FusedProviderForce
+
+solver = FastMultipoleMethod(preset="galaxy", softening=1.5e-3)
+prov = FusedForceProvider.prepare(
+    solver, x0, m, leaf_size=64, max_order=6, caps_only=True
+)[0]  # no reference to the eager topology: it holds the eager tree
+force = FusedProviderForce(prov)
+state = force.initial_state(x0, v0, m, time=0.0, external_fn=halo, external_args=p)
+
+
+@functools.cache  # one compiled 50-step segment per force model
+def segment(f):
+    return jax.jit(
+        lambda s: leapfrog_kdk_rollout(
+            s, dt, f, n_steps=50, external_fn=halo, external_args=p
+        )
+    )
+
+
+def run(f, s):
+    return segment(f)(s), None
+
+
+for _ in range(n_segments):
+    result = retry_segment(
+        state,
+        force,
+        run,
+        overflowed=force.overflowed,
+        replan=functools.partial(
+            FusedProviderForce.replan, external_fn=halo, external_args=p
+        ),
+    )
+    state, force = result.state, result.force
+```
+
+`halo(positions, time, args)` is an optional external acceleration, added at
+every force evaluation (in the block scheme, kicked on each particle's own
+rung). The single-rung step is the kick-drift-kick leapfrog written in jaccpot's
+velocity-Verlet expressions, so the rollout is `strict_run_v2(carry="particles")`
+and jaccpot's production runner bit for bit (with an external field on CPU, XLA
+rounds a few velocity components 1 ulp apart;
+`tests/integration/test_jaccpot_provider_rollout.py`).
+
 ## Planned Architecture
 
 - `nornax.state`: particle state and cached force derivatives
