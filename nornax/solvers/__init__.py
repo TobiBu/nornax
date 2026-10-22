@@ -22,6 +22,7 @@ from .leapfrog_kdk import (
     supports_traced_level_weights,
     total_acceleration,
 )
+from .segments import SegmentResult, retry_segment
 
 __all__ = [
     "Hermite4",
@@ -29,6 +30,7 @@ __all__ = [
     "Hermite4State",
     "Hermite6",
     "Hermite8",
+    "SegmentResult",
     "advance_base_step",
     "block_kdk_base_step",
     "block_kdk_rollout",
@@ -40,6 +42,7 @@ __all__ = [
     "initialize_block_state",
     "leapfrog_kdk_rollout",
     "leapfrog_kdk_step",
+    "retry_segment",
     "shooting_defect",
     "shooting_node",
     "supports_traced_level_weights",
