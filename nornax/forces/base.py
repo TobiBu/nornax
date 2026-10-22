@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from nornax._typing import IntPerParticle, PerLevel, PerParticle, ScalarLike, Vec3
 from nornax.state import ForceDerivatives
@@ -227,4 +227,49 @@ class FusedMutualForceModel(MutualForceModel, Protocol):
         interaction structure this boundary is kicked against, and it is the
         *same* value for every boundary of a base step -- the integrator rebuilds
         it at base-step boundaries only, never between sub-steps.
+        """
+
+
+@runtime_checkable
+class RebuildingForceModel(Protocol):
+    """A single-rung force that rebuilds its own structure at every evaluation.
+
+    The topology of :class:`MutualForceModel` is a *frozen* interaction structure:
+    built once, then evaluated against at whatever positions the integrator
+    reaches until the next rebuild. Some backends have no such thing. jaccpot's
+    fused single-GPU lane (``FusedForceProvider``) runs its far field inside the
+    rebuild, at the positions it is given, and evaluates the rest from that
+    result without reading positions again -- its structure is bound to one set
+    of positions, so it can only be rebuilt where it is evaluated, every time.
+    What such a backend *does* hand from one evaluation to the next is small: the
+    next rebuild's inputs (jaccpot's ``dehnen_error`` force scale) and the
+    capacity verdict of the evaluations so far.
+
+    :meth:`rebuild_accelerations` is that evaluation: rebuild at ``positions``,
+    evaluate, and return the acceleration with the value to carry. The
+    single-rung KDK integrator detects the protocol, keeps the returned value in
+    ``BlockStepState.topology`` and hands it back on the next evaluation, so the
+    carry holds the small value and never the structure. Such a model takes no
+    ``rebuild_fn`` (it rebuilds itself) and is refused by the multi-rung base
+    step, whose levels it cannot split.
+
+    Marked ``runtime_checkable`` so that integrators can probe for it with
+    ``isinstance``; a model may implement :class:`MutualForceModel` as well (the
+    jaccpot adapter does, for its level-0 evaluation).
+    """
+
+    def rebuild_accelerations(
+        self,
+        positions: Vec3,
+        masses: PerParticle,
+        *,
+        topology: Any = None,
+        args: object = None,
+    ) -> tuple[Vec3, Any]:
+        """Rebuild at ``positions``, evaluate, return ``(acc, topology)``.
+
+        ``topology`` is the value the previous evaluation returned (``None``
+        before the first, if the model accepts that); the returned one must have
+        the same pytree structure on every call after the first, since it rides
+        in a ``lax.scan`` carry. ``args`` is the caller's channel, as everywhere.
         """

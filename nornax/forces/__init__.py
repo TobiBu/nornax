@@ -1,6 +1,11 @@
 """Force backends for Nornax."""
 
-from .base import ForceModel, FusedMutualForceModel, MutualForceModel
+from .base import (
+    ForceModel,
+    FusedMutualForceModel,
+    MutualForceModel,
+    RebuildingForceModel,
+)
 from .direct import DirectSumGravity
 from .mutual_direct import MutualDirectSumGravity
 
@@ -10,4 +15,5 @@ __all__ = [
     "FusedMutualForceModel",
     "MutualDirectSumGravity",
     "MutualForceModel",
+    "RebuildingForceModel",
 ]

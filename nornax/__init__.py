@@ -25,6 +25,7 @@ from .forces import (  # noqa: E402
     FusedMutualForceModel,
     MutualDirectSumGravity,
     MutualForceModel,
+    RebuildingForceModel,
 )
 from .initial_conditions import (  # noqa: E402
     sample_hernquist_sphere,
@@ -62,6 +63,7 @@ __all__ = [
     "MutualDirectSumGravity",
     "MutualForceModel",
     "NBodyState",
+    "RebuildingForceModel",
     "assert_fused_boundary_selected",
     "block_kdk_base_step",
     "block_kdk_rollout",
