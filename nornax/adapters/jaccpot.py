@@ -574,6 +574,11 @@ class FusedProviderForce:
         -------
         str | None
             ``"full"``, ``"walk"`` or ``None`` (decline).
+
+        Raises
+        ------
+        ValueError
+            Without the ``done`` count (:attr:`counts_done`).
         """
         from jaccpot.runtime.fused_topology import NEEDS_FIELDS
 
