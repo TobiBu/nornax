@@ -403,7 +403,7 @@ def test_the_aux_counts_the_steps_that_fitted_before_the_first_failure() -> None
     evaluation so far fitted, and none after the first that did not."""
     x, v, m = _cluster(seed=3, spread=2.0)  # flying apart: the reach grows
     reach = lambda y: float(jnp.max(jnp.linalg.norm(y, axis=-1)))  # noqa: E731
-    roomy = FusedProviderForce(_DirectProvider())
+    roomy = FusedProviderForce(_DirectProvider(), count_done=True)
     s0 = roomy.initial_state(x, v, m)
     assert FusedProviderForce.done(s0) == 0
     _, records = leapfrog_kdk_rollout(
@@ -415,7 +415,7 @@ def test_the_aux_counts_the_steps_that_fitted_before_the_first_failure() -> None
     assert FusedProviderForce.done(final) == 6 and roomy.verdict(final)[0]
     # a capacity between the reaches after steps 3 and 4: three steps fit
     tight = FusedProviderForce(
-        _DirectProvider(capacity=0.5 * (reaches[3] + reaches[4]))
+        _DirectProvider(capacity=0.5 * (reaches[3] + reaches[4])), count_done=True
     )
     final = leapfrog_kdk_rollout(tight.initial_state(x, v, m), 0.05, tight, n_steps=6)
     assert FusedProviderForce.done(final) == 3 and tight.overflowed(final)
@@ -495,13 +495,16 @@ def test_a_segment_learned_step_by_step_is_retried_while_it_progresses(different
     freezes the gradient plan again on its topology."""
     x, v, m = _cluster(seed=3, spread=2.0)
     events: list = []
-    roomy = FusedProviderForce(_DirectProvider(), differentiable=differentiable)
+    roomy = FusedProviderForce(
+        _DirectProvider(), differentiable=differentiable, count_done=True
+    )
     want, _ = _segment(roomy, roomy.initial_state(x, v, m))
     tight = FusedProviderForce(
         _DirectProvider(
             capacity=float(jnp.max(jnp.linalg.norm(x, axis=-1))), events=events
         ),
         differentiable=differentiable,
+        count_done=True,
     )
     seen: list = []
 
@@ -548,7 +551,9 @@ def test_the_retry_rule_is_jaccpots_segment_retry_next():
                 np.asarray(needs).astype(np.int64), int(retries), bool(tree_first)
             )
 
-    force = FusedProviderForce(_Policy())
+    force = FusedProviderForce(_Policy(), count_done=True)
+    with pytest.raises(ValueError, match="count_done=True"):
+        FusedProviderForce(_Policy()).retry_next(())
     index = NEEDS_FIELDS.index
     rng = np.random.default_rng(0)
     checked = 0
@@ -580,3 +585,23 @@ def test_the_retry_rule_is_jaccpots_segment_retry_next():
         assert force.retry_next(failures) == want, attempts
         checked += want is not None and len(attempts) > 2
     assert checked > 0  # the table reaches the progress branch
+
+
+def test_the_default_mode_carries_the_providers_aux_and_no_count() -> None:
+    """Without ``count_done`` (nor ``differentiable``) the aux is the provider's
+    ``(f_b, bits, needs)``, the S4 program's carry; the progress rule then fails
+    clearly, and with the count on it is ``(f_b, bits, needs, done)``."""
+    x, v, m = _cluster(seed=5)
+    plain = FusedProviderForce(_DirectProvider())
+    final = leapfrog_kdk_rollout(plain.initial_state(x, v, m), 0.01, plain, n_steps=2)
+    assert len(final.topology) == 3 and not plain.counts_done
+    with pytest.raises(ValueError, match="count_done=True"):
+        FusedProviderForce.done(final)
+    with pytest.raises(ValueError, match="count_done=True"):
+        FusedProviderForce.progressed(((final.topology, None), (final.topology, None)))
+    counted = FusedProviderForce(_DirectProvider(), count_done=True)
+    final = leapfrog_kdk_rollout(
+        counted.initial_state(x, v, m), 0.01, counted, n_steps=2
+    )
+    assert len(final.topology) == 4 and FusedProviderForce.done(final) == 2
+    assert FusedProviderForce(_DirectProvider(), differentiable=True).counts_done

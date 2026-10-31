@@ -244,14 +244,15 @@ class FusedProviderForce:
     ``provider.step(positions, masses, params, aux)`` -- the static-radix tree
     rebuilt from the provider's shape template at ``positions``, the walk with
     fresh lists, the far field, then the near field and L2P -- and returns the
-    acceleration with ``aux = (f_b, bits, needs, done)``: the provider's own
-    ``(f_b, bits, needs)`` -- the next rebuild's force scale
-    (``mac_type='dehnen_error'`` only, else ``None``), the overflow bits OR-ed
-    and the walk/tree needs max-ed over every evaluation the value has seen --
-    and ``done``, how many evaluations after the start force fitted before the
-    first that did not (``int32``; what the lane's scans count as a retry's
-    progress, ``done + capacity_ok``, folded here from the verdict bits:
-    :meth:`done`).
+    acceleration with the provider's ``aux = (f_b, bits, needs)`` -- the next
+    rebuild's force scale (``mac_type='dehnen_error'`` only, else ``None``), the
+    overflow bits OR-ed and the walk/tree needs max-ed over every evaluation the
+    value has seen. With :attr:`counts_done` (``count_done=True``, or
+    ``differentiable=True``) the aux is ``(f_b, bits, needs, done)``: ``done``
+    is how many evaluations after the start force fitted before the first that
+    did not (``int32``; what the lane's scans count as a retry's progress,
+    ``done + capacity_ok``, folded here from the verdict bits: :meth:`done`).
+    Off by default, so the default mode is the S4 program, HLO for HLO.
     :func:`~nornax.solvers.leapfrog_kdk.leapfrog_kdk_rollout` carries that aux in
     ``BlockStepState.topology`` and hands it back, so the scan carries a few
     words and one force scale per particle, never the lane's prepared state.
@@ -286,9 +287,11 @@ class FusedProviderForce:
             progressed=FusedProviderForce.progressed,
         )
 
-    That is the runners' behaviour and the one to use. Without ``progressed``
-    the driver stops at its ``max_retries`` (two) re-runs whatever the
-    progress; ``JACCPOT_STRICT_SEGMENT_RETRY=0`` turns every retry off, as in
+    with ``force = FusedProviderForce(prov, count_done=True)`` (the progress
+    rule reads the ``done`` count). That is the runners' behaviour and the one
+    to use. Without ``progressed`` (and without the count) the driver stops at
+    its ``max_retries`` (two) re-runs whatever the progress, and :meth:`replan`
+    follows the policy alone; ``JACCPOT_STRICT_SEGMENT_RETRY=0`` turns every retry off, as in
     the runners. The masses must reach the jitted program as an argument
     (they do inside the state); closed over, XLA compiles them as constants and
     the bits can move (jaccpot ``docs/fused_provider.md``).
@@ -319,12 +322,26 @@ class FusedProviderForce:
         argument of the jitted program, to trace them.
     differentiable : bool
         Evaluate with ``provider.differentiable_step`` (``False``, the
-        default: ``provider.step``, the production program).
+        default: ``provider.step``, the production program). Implies the
+        ``done`` count.
+    count_done : bool
+        Carry the ``done`` count in the aux, which :meth:`progressed` and
+        :meth:`retry_next` (the runners' retry past their policy) read.
+        ``False`` (the default, with ``differentiable=False``) keeps the aux
+        the provider's ``(f_b, bits, needs)`` and the program the S4 one,
+        HLO for HLO.
     """
 
     provider: Any
     params: Any = None
     differentiable: bool = False
+    count_done: bool = False
+
+    @property
+    def counts_done(self) -> bool:
+        """Whether the aux carries the ``done`` count: :attr:`count_done` or
+        :attr:`differentiable`."""
+        return bool(self.count_done or self.differentiable)
 
     def _params(self, args: object) -> Any:
         """The force parameters of a call: its ``args`` if given, else the default."""
@@ -338,15 +355,23 @@ class FusedProviderForce:
         topology: Any = None,
         args: object = None,
     ) -> tuple[Vec3, Any]:
-        """One provider step at ``positions``: ``(acc, (f_b, bits, needs, done))``.
+        """One provider step at ``positions``: ``(acc, (f_b, bits, needs))``.
 
         ``topology`` is the previous evaluation's aux (``None`` before the first;
         under ``dehnen_error`` it must carry a force scale, ``(f_b, None,
-        None)``); ``args`` overrides the force parameters. The provider sees
-        ``(f_b, bits, needs)``; ``done`` starts at zero with a seed (the start
-        force) and grows by one per evaluation while the folded verdict holds.
-        With :attr:`differentiable` the step is ``provider.differentiable_step``.
+        None)``); ``args`` overrides the force parameters. With
+        :attr:`counts_done` the aux is ``(f_b, bits, needs, done)``: the provider
+        still sees ``(f_b, bits, needs)``, and ``done`` starts at zero with a
+        seed (the start force) and grows by one per evaluation while the folded
+        verdict holds. With :attr:`differentiable` the step is
+        ``provider.differentiable_step``.
         """
+        if not self.counts_done:
+            # the default mode: the S4 program, call for call
+            acc, aux = self.provider.step(
+                positions, masses, self._params(args), aux=topology
+            )
+            return jnp.asarray(acc, dtype=positions.dtype), aux
         seed, done = _split_aux(topology)
         step = (
             self.provider.differentiable_step
@@ -504,7 +529,8 @@ class FusedProviderForce:
         if len(aux) != 4:
             raise ValueError(
                 "the aux is the provider's (f_b, bits, needs), without the "
-                "adapter's done count; build the state with initial_state"
+                "adapter's done count: build the force with "
+                "FusedProviderForce(..., count_done=True) (or differentiable=True)"
             )
         return int(np.asarray(jax.device_get(aux[3])))
 
@@ -517,7 +543,9 @@ class FusedProviderForce:
         policy): it fitted more steps than every earlier attempt, or it failed
         at the same step as the one before, whose needs were lower bounds, and
         needed more than they said. ``failures`` are the driver's
-        ``(topology, records)`` pairs, oldest first; their tops carry ``done``.
+        ``(topology, records)`` pairs, oldest first; their tops carry ``done``,
+        so the force must count it (:attr:`counts_done`): ``ValueError``
+        otherwise.
         """
         attempts = [
             (FusedProviderForce.done(t), FusedProviderForce._needs(t))
@@ -549,6 +577,11 @@ class FusedProviderForce:
         """
         from jaccpot.runtime.fused_topology import NEEDS_FIELDS
 
+        if not self.counts_done:
+            raise ValueError(
+                "retry_next reads the done count: build the force with "
+                "FusedProviderForce(..., count_done=True) (or differentiable=True)"
+            )
         tree = NEEDS_FIELDS.index("tree_overflow")
         needs = self._needs(failures[-1][0])
         tree_first = bool(self._needs(failures[0][0])[tree])
@@ -588,7 +621,8 @@ class FusedProviderForce:
         The lane's segment retry: the runners' rule (:meth:`retry_next` -- the
         policy ``provider.retry_mode``, a full re-plan first and a walk-only
         one after a first that re-planned the tree, then again while each
-        re-run makes progress) on the needs of the latest failure,
+        re-run makes progress; without :attr:`counts_done` the policy alone)
+        on the needs of the latest failure,
         ``provider.replanned`` (caps-only, as the particle carry) at the
         segment's start positions, and the start state's force evaluated again
         with the re-planned provider, its verdict fresh and its force scale
@@ -620,7 +654,18 @@ class FusedProviderForce:
                     "lists were not symmetric (OVERFLOW_GRAD_LISTS): its gradient "
                     "is NaN and no re-plan changes the lists"
                 )
-        mode = self.retry_next(failures)
+        if self.counts_done:
+            mode = self.retry_next(failures)
+        else:
+            # without the count: the policy alone, as before the progress rule
+            from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+            tree = NEEDS_FIELDS.index("tree_overflow")
+            mode = self.provider.retry_mode(
+                self._needs(failures[-1][0]),
+                len(failures) - 1,
+                bool(self._needs(failures[0][0])[tree]),
+            )
         if mode is None:
             return None
         replanned = self.provider.replanned(
