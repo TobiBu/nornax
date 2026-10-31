@@ -198,3 +198,100 @@ def test_a_donating_segment_is_rerun_from_a_kept_copy_of_its_start():
     assert starts[0].acc is None
     for name in ("positions", "velocities", "acc", "base_index"):
         assert jnp.array_equal(getattr(got.state, name), getattr(want, name)), name
+
+
+# --- the progress rule: retries past max_retries while each re-run gets further ---
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class _Counted:
+    """``_Capped`` with jaccpot's segment bookkeeping: the reach is folded over
+    the steps up to the first failure only (later ones ran on a truncated force),
+    and ``done`` counts the steps that fitted before it."""
+
+    capacity: float
+
+    def rebuild_accelerations(self, positions, masses, *, topology=None, args=None):
+        reach = jnp.max(jnp.linalg.norm(positions, axis=-1))
+        over = reach > self.capacity
+        done = jnp.zeros((), jnp.int32)
+        if topology is not None:
+            on = ~topology["over"]
+            over = topology["over"] | over
+            reach = jnp.where(
+                on, jnp.maximum(reach, topology["reach"]), topology["reach"]
+            )
+            done = topology["done"] + (~over).astype(jnp.int32)
+        acc = MutualDirectSumGravity(softening=0.05).level_accelerations(
+            positions, masses, rung=jnp.zeros(positions.shape[0], jnp.int32), level=0
+        )
+        return acc, {"over": over, "reach": reach, "done": done}
+
+    def level_accelerations(  # noqa: D102
+        self, positions, masses, *, rung, level, args=None, topology=None
+    ):
+        return self.rebuild_accelerations(positions, masses, topology=topology)[0]
+
+
+def _further(failures):
+    """The rule's first half: the latest attempt fitted more steps than any before."""
+    done = [int(top["done"]) for top, _ in failures]
+    return len(done) > 1 and done[-1] > max(done[:-1])
+
+
+def _to_the_failing_step(factor: float, seen: list):
+    """A re-plan to ``factor`` x what the failed attempt needed up to its failure."""
+
+    def replan(force, start, failures):
+        seen.append(int(failures[-1][0]["done"]))
+        grown = _Counted(capacity=factor * float(failures[-1][0]["reach"]))
+        fresh = _start(grown, start.positions, start.velocities, start.masses)
+        return grown, fresh._replace(base_index=start.base_index)
+
+    return replan
+
+
+def test_a_segment_learned_one_step_at_a_time_is_retried_past_max_retries():
+    """Each re-plan covers the failing step only, so each re-run fits one more step:
+    with ``progressed`` the driver keeps going past ``max_retries = 2`` until the
+    segment fits, and the result is a roomy run's, bit for bit."""
+    positions, velocities, masses = _expanding()
+    roomy = _Counted(capacity=100.0)
+    want, _ = _run(roomy, _start(roomy, positions, velocities, masses))
+    tight = _Counted(capacity=float(jnp.max(jnp.linalg.norm(positions, axis=-1))))
+    seen: list = []
+    got = retry_segment(
+        _start(tight, positions, velocities, masses),
+        tight,
+        _run,
+        overflowed=lambda final, records: bool(final.topology["over"]),
+        replan=_to_the_failing_step(1.0, seen),
+        progressed=_further,
+    )
+    assert got.retries == _STEPS > 2
+    assert seen == list(range(_STEPS))  # done grows by one per re-run
+    for name in ("positions", "velocities", "acc", "base_index"):
+        assert jnp.array_equal(getattr(got.state, name), getattr(want, name)), name
+
+
+def test_without_progress_or_without_the_rule_the_retries_stop_at_max_retries():
+    """A re-plan that grows too little fails at the same step: no progress, so the
+    driver stops after ``max_retries``; without ``progressed`` it stops there too,
+    progress or not."""
+    positions, velocities, masses = _expanding()
+    tight = _Counted(capacity=float(jnp.max(jnp.linalg.norm(positions, axis=-1))))
+    start = _start(tight, positions, velocities, masses)
+    kw = dict(overflowed=lambda final, records: bool(final.topology["over"]))
+    seen: list = []
+    with pytest.raises(RuntimeError, match="after 2 re-planned re-runs, the last"):
+        retry_segment(
+            start,
+            tight,
+            _run,
+            replan=_to_the_failing_step(0.999, seen),
+            progressed=_further,
+            **kw,
+        )
+    assert seen == [0, 0]
+    with pytest.raises(RuntimeError, match="after 2 re-planned re-runs$"):
+        retry_segment(start, tight, _run, replan=_to_the_failing_step(1.0, []), **kw)
