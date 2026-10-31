@@ -26,7 +26,9 @@ the system, so linear momentum then changes by exactly the external impulse.
 
 from __future__ import annotations
 
+import functools
 import inspect
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -391,6 +393,152 @@ def _check_cadence(rebuild_fn: Any, rebuild_every: Any) -> int:
     return rebuild_every
 
 
+#: the ``checkpoint`` modes of :func:`leapfrog_kdk_rollout` that remat whole steps
+_WHOLE_STEP_MODES = ("step", "nested")
+
+
+def _checkpoint_mode(checkpoint: Any, checkpoint_inner: Any) -> bool | str:
+    """Validate ``leapfrog_kdk_rollout``'s ``checkpoint`` / ``checkpoint_inner``.
+
+    Returns ``checkpoint`` as a ``bool`` or one of :data:`_WHOLE_STEP_MODES`.
+    Raises ``ValueError`` for any other string, and for a ``checkpoint_inner``
+    given without ``checkpoint="nested"`` or below one.
+    """
+    if isinstance(checkpoint, str):
+        if checkpoint not in _WHOLE_STEP_MODES:
+            raise ValueError(
+                f"checkpoint must be False, True, 'step' or 'nested'; got {checkpoint!r}"
+            )
+        mode: bool | str = checkpoint
+    else:
+        mode = bool(checkpoint)
+    if checkpoint_inner is not None:
+        if mode != "nested":
+            raise ValueError(
+                "checkpoint_inner sets the inner scan of checkpoint='nested' only; "
+                f"got it with checkpoint={checkpoint!r}"
+            )
+        if int(checkpoint_inner) < 1:
+            raise ValueError(f"checkpoint_inner must be >= 1; got {checkpoint_inner}")
+    return mode
+
+
+def nested_split(n_steps: int, checkpoint_inner: int | None = None) -> tuple[int, int]:
+    """``(n_outer, n_inner)`` of a ``checkpoint="nested"`` rollout of ``n_steps``.
+
+    ``n_inner`` is ``checkpoint_inner``, by default the integer nearest
+    ``sqrt(n_steps)`` (at least one), which minimizes the stored checkpoints
+    ``n_outer + n_inner``; ``n_outer = n_steps // n_inner``. The
+    ``n_steps - n_outer * n_inner`` steps left over run as one more inner scan
+    after the outer one, checkpointed the same way.
+
+    Parameters
+    ----------
+    n_steps : int
+        The rollout's step count.
+    checkpoint_inner : int | None
+        The inner scan's length, or ``None`` for about ``sqrt(n_steps)``.
+
+    Returns
+    -------
+    tuple[int, int]
+        The outer scan's length and the inner scan's.
+    """
+    n_steps = int(n_steps)
+    if checkpoint_inner is None:
+        n_inner = max(1, int(round(math.sqrt(n_steps))))
+    else:
+        n_inner = int(checkpoint_inner)
+    return n_steps // n_inner, n_inner
+
+
+def _lean_rollout(
+    state: BlockStepState,
+    dt: Any,
+    close: Callable[[BlockStepState, Vec3, Any], BlockStepState],
+    rebuild: Callable[[Vec3, PerParticle, Any, Any], Any] | None,
+    *,
+    n_steps: int,
+    nested: bool,
+    checkpoint_inner: int | None,
+    record_fn: Callable[[BlockStepState], Any] | None,
+) -> BlockStepState | tuple[BlockStepState, Any]:
+    """``leapfrog_kdk_rollout`` with ``checkpoint="step"`` or ``"nested"``.
+
+    The step is :func:`leapfrog_kdk_rollout`'s -- the drift, the rebuild on its
+    cadence, then ``close`` (force and kick) -- on the same expressions, so the
+    forward is the other modes' bit for bit; only the carry and the remat
+    differ.
+
+    * The scanned carry is ``state`` with ``masses`` and ``rung`` set to
+      ``None`` (empty pytrees): the step closes over them, so each scan holds
+      them as constants -- one copy, never a per-step residual -- and they
+      remain whatever the caller passed: tracers of a jitted rollout's
+      arguments, not compile-time literals.
+    * The remat boundary sits AFTER the drift: ``jax.checkpoint`` wraps the
+      rebuild, the force and the kick, and takes the drifted positions as an
+      input. The drift and the kick are linear in ``(x, v, acc)`` with constant
+      coefficients, so their backward needs no primal value, and the step's
+      only nonlinear input is the point the force is evaluated at: JAX stores
+      ``x_new`` (plus what the carried topology hands the rebuild, e.g.
+      jaccpot's force scale) and nothing of ``v`` or ``acc``. A boundary
+      before the drift stores ``x, v, acc`` instead -- three times as much:
+      36 against 12 B/p per step on the float32 direct sum (compiled
+      temporaries of ``jax.grad``, 8 -> 16 -> 32 steps at N = 4096, CPU,
+      2026-10-31). A differentiated ``dt`` makes the drift nonlinear in it,
+      and JAX then stores ``v`` and ``acc`` as well.
+    * ``prevent_cse=False`` on the checkpoints inside a scan, where control
+      flow already keeps XLA from merging a recompute with the forward
+      (``jax.checkpoint``'s documentation).
+    """
+    masses, rung = state.masses, state.rung
+
+    def full(carry: BlockStepState) -> BlockStepState:
+        return carry._replace(masses=masses, rung=rung)
+
+    @functools.partial(jax.checkpoint, prevent_cse=False)
+    def evaluate(now: BlockStepState, x_new: Vec3) -> BlockStepState:
+        structure = now.topology
+        if rebuild is not None:
+            structure = rebuild(x_new, masses, now.base_index + 1, structure)
+        return close(now, x_new, structure)
+
+    def step(carry: BlockStepState) -> BlockStepState:
+        now = full(carry)
+        return evaluate(now, _drift(now, dt))._replace(masses=None, rung=None)
+
+    def run(carry: BlockStepState, *, length: int) -> tuple[BlockStepState, Any]:
+        def body(c: BlockStepState, _: None) -> tuple[BlockStepState, Any]:
+            c = step(c)
+            return c, (None if record_fn is None else record_fn(full(c)))
+
+        return jax.lax.scan(body, carry, xs=None, length=length)
+
+    carry = state._replace(masses=None, rung=None)
+    if not nested:
+        carry, records = run(carry, length=n_steps)
+    else:
+        n_outer, n_inner = nested_split(n_steps, checkpoint_inner)
+        chunk = jax.checkpoint(
+            functools.partial(run, length=n_inner), prevent_cse=False
+        )
+        carry, records = jax.lax.scan(
+            lambda c, _: chunk(c), carry, xs=None, length=n_outer
+        )
+        records = jax.tree.map(
+            lambda r: r.reshape((n_outer * n_inner,) + r.shape[2:]), records
+        )
+        n_left = n_steps - n_outer * n_inner
+        if n_left:
+            # outside any scan: the default prevent_cse keeps the recompute apart
+            carry, rest = jax.checkpoint(functools.partial(run, length=n_left))(carry)
+            records = jax.tree.map(lambda a, b: jnp.concatenate([a, b]), records, rest)
+    final = full(carry)
+    if record_fn is None:
+        return final
+    return final, records
+
+
 def leapfrog_kdk_rollout(
     state: BlockStepState,
     dt: ScalarLike,
@@ -400,7 +548,8 @@ def leapfrog_kdk_rollout(
     args: object = None,
     external_fn: ExternalField | None = None,
     external_args: object = None,
-    checkpoint: bool = False,
+    checkpoint: bool | str = False,
+    checkpoint_inner: int | None = None,
     topology: Any = None,
     rebuild_fn: Callable[[Vec3, PerParticle], Any] | None = None,
     rebuild_every: int = 1,
@@ -432,11 +581,41 @@ def leapfrog_kdk_rollout(
     * ``record_fn(state) -> pytree`` is called on the state after every step and
       the records are stacked along a leading ``n_steps`` axis; the rollout then
       returns ``(final, records)``, ``final`` alone otherwise.
-    * ``checkpoint`` wraps each step's force evaluation and velocity update in
-      ``jax.checkpoint`` (off by default here, unlike the block rollout, so the
-      default program is the one it always was): the backward pass recomputes a
-      step's force instead of storing it. The rebuild stays outside the remat, so
-      the backward never repeats a traversal.
+    * ``checkpoint`` sets what the backward pass stores (off by default here,
+      unlike the block rollout, so the default program is the one it always
+      was). The modes trade memory for recomputation:
+
+      - ``True`` wraps each step's force evaluation and velocity update in
+        ``jax.checkpoint``: the backward recomputes a step's force instead of
+        storing it. The rebuild stays outside the remat, so the backward never
+        repeats a traversal. A step stores the drifted positions and, as they
+        ride in the carry into the remat, the masses and the rung.
+      - ``"step"`` rematerializes every step's rebuild (``rebuild_fn``, or a
+        rebuilding model's own), force and kick, and scans a carry without the
+        masses and the rung: the body closes over them, so they are scan
+        constants, stored once and not once per step. The remat boundary sits
+        after the drift, so a step stores the drifted positions -- the force's
+        only nonlinear input -- and what the carried ``topology`` hands the next
+        rebuild (jaccpot's force scale), never ``v`` or ``acc``. Measured on the
+        float32 direct sum (compiled temporaries of ``jax.grad`` at 8, 16 and 32
+        steps, N = 4096, CPU, 2026-10-31): 12 B/p per step, against 20 for
+        ``True`` (the drifted positions, the masses and the rung) and 36 for a
+        boundary before the drift. The backward recomputes the step, its
+        rebuild included.
+      - ``"nested"`` is two scans: an outer one over ``n_outer`` chunks of
+        ``checkpoint_inner`` steps (by default about ``sqrt(n_steps)``; see
+        :func:`nested_split`), each chunk checkpointed as a whole and each of
+        its steps as in ``"step"``. The backward stores ``n_outer`` chunk
+        starts (whole carries: 36 B/p on the float32 direct sum) plus, for the
+        chunk it is differentiating, ``checkpoint_inner`` steps' drifted
+        positions, at the price of one more forward of every step. The
+        ``n_steps % checkpoint_inner`` steps left over run as one more chunk.
+
+      The forward is the same in every mode, bit for bit. The gradient is the
+      same map's, but not bit for bit across modes: a remat boundary changes
+      the order in which JAX sums a value's cotangents (``True`` and ``False``
+      already differ by an ulp; measured, float64 direct sum, 7 steps: at most
+      2.2e-16 relative on positions and velocities, 1.3e-14 on masses).
 
     The carried topology reaches the force as the explicit ``topology=`` keyword,
     and only when one is carried: with every hook at its default each call is
@@ -446,9 +625,12 @@ def leapfrog_kdk_rollout(
     returns; it takes no ``rebuild_fn``. ``external_fn`` / ``external_args`` add
     the external field (module docstring).
 
-    Raises ``ValueError`` on an invalid cadence (see :func:`block_kdk_rollout`)
-    and for a ``rebuild_fn`` given with a rebuilding model.
+    Raises ``ValueError`` on an invalid cadence (see :func:`block_kdk_rollout`),
+    for a ``rebuild_fn`` given with a rebuilding model, for an unknown
+    ``checkpoint`` mode, and for a ``checkpoint_inner`` without
+    ``checkpoint="nested"`` (or below one).
     """
+    mode = _checkpoint_mode(checkpoint, checkpoint_inner)
     dt = jnp.asarray(dt, dtype=state.positions.dtype)
     rebuild_every = _check_cadence(rebuild_fn, rebuild_every)
     if rebuild_fn is not None and isinstance(force, RebuildingForceModel):
@@ -484,6 +666,18 @@ def leapfrog_kdk_rollout(
             args=args,
             external_fn=external_fn,
             external_args=external_args,
+        )
+
+    if isinstance(mode, str):
+        return _lean_rollout(
+            state,
+            dt,
+            close,
+            rebuild if rebuild_fn is not None else None,
+            n_steps=n_steps,
+            nested=mode == "nested",
+            checkpoint_inner=checkpoint_inner,
+            record_fn=record_fn,
         )
 
     close_fn = jax.checkpoint(close) if checkpoint else close
