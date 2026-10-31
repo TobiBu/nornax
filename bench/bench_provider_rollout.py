@@ -181,6 +181,7 @@ def main() -> int:
             replan=lambda f_in, start, failures: f_in.replan(
                 start, failures, args=params, external_fn=external_fn
             ),
+            progressed=FusedProviderForce.progressed,
             donates=bool(args.donate_state),
         )
 
