@@ -308,7 +308,13 @@ class FusedProviderForce:
     so a differentiable rollout is the production trajectory; differentiate it
     with ``leapfrog_kdk_rollout(..., checkpoint="step")`` (or ``"nested"``),
     which rematerializes each step's rebuild and force and stores the drifted
-    positions and the force scale per step.
+    positions and the force scale per step. Measured on an A100 (2e6 Plummer
+    particles, ``preset="galaxy"``: leaf 64, p6, theta 0.8, ``dehnen_error``;
+    float32; compiled temporaries of ``jax.grad`` at 2, 4 and 8 steps,
+    2026-10-31): 16.0 B/p per step for ``"step"`` (x_new 12 + f_b 4), 20.0 for
+    ``True`` (plus the masses), 20.0 for ``"nested"`` at two steps per chunk
+    (one 40 B/p carry per chunk); the gradient finite and bitwise the same on
+    a second evaluation.
 
     Attributes
     ----------
