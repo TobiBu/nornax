@@ -178,6 +178,12 @@ and jaccpot's production runner bit for bit (with an external field on CPU, XLA
 rounds a few velocity components 1 ulp apart;
 `tests/integration/test_jaccpot_provider_rollout.py`).
 
+A multiple-shooting node on this force is `shooting_node(x, v, m, force,
+k_max=0, dt_max=dt, topology=FusedProviderForce.seed(f_b))`: it carries the
+evaluation's aux (verdict, count, force scale), so a rollout from it is the
+rollout from `initialize_block_state` bit for bit
+(`tests/integration/test_jaccpot_provider_shooting.py`).
+
 ### Analytic galaxy potentials
 
 `nornax.potentials` has external fields in that convention with traced,
