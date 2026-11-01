@@ -1210,15 +1210,60 @@ def shooting_node(
     node's positions and ``time`` to ``acc`` (so the rungs follow the total), as
     :func:`initialize_block_state` does; the segment's rollout takes the same.
 
+    **A rebuilding model** (:class:`~nornax.forces.base.RebuildingForceModel`,
+    jaccpot's fused provider) is single-rung and rebuilds itself, as in
+    :func:`initialize_block_state`: ``k_max`` must be ``0`` and ``rebuild_fn``
+    ``None``, ``topology`` is the value the node's evaluation starts from (its
+    *seed*: ``None``, or under jaccpot's ``dehnen_error`` the force scale
+    ``(f_b, None, None)`` -- see
+    :meth:`~nornax.adapters.jaccpot.FusedProviderForce.initial_state`), and the
+    node carries what that evaluation returns -- the aux the segment's
+    :func:`leapfrog_kdk_rollout` carries in its scan, so the two have one pytree
+    structure. ``acc`` and the node are then :func:`initialize_block_state`'s,
+    bit for bit; ``rung`` is zero (``dt_max`` / ``eta`` / ``eps`` are unused).
+    The returned aux is severed from the gradient: it is bookkeeping (the next
+    rebuild's force scale, the capacity verdict, counts), and the model's own
+    differentiable evaluation already severs its rebuild at the inputs.
+    ``acc`` stays differentiable in ``positions`` and ``masses`` as far as the
+    model's evaluation is (``FusedProviderForce(differentiable=True)``).
+
     The matching residual that goes with this projection is
     :func:`shooting_defect`, on ``(positions, velocities)`` only. Nothing here
     claims anything about the convergence of a shooting solve; this makes it
     expressible.
+
+    Raises ``ValueError`` for a rebuilding model with ``k_max != 0`` or with a
+    ``rebuild_fn``.
     """
     positions = jnp.asarray(positions)
     velocities = jnp.asarray(velocities)
     masses = jnp.asarray(masses)
     n = int(positions.shape[0])
+    if isinstance(force, RebuildingForceModel):
+        if int(k_max) != 0 or rebuild_fn is not None:
+            raise ValueError(
+                "a RebuildingForceModel is single-rung and rebuilds itself: "
+                f"k_max must be 0 and rebuild_fn None (got k_max={k_max}, "
+                f"rebuild_fn={rebuild_fn!r})"
+            )
+        acc, topology = force.rebuild_accelerations(
+            positions, masses, topology=topology, args=args
+        )
+        time = None if time is None else jnp.asarray(time, dtype=positions.dtype)
+        if external_fn is not None:
+            acc = acc + _external_acceleration(
+                external_fn, positions, time, external_args
+            )
+        return BlockStepState(
+            positions=positions,
+            velocities=velocities,
+            masses=masses,
+            acc=acc,
+            rung=jnp.zeros(n, dtype=jnp.int32),
+            base_index=jnp.asarray(base_index, dtype=jnp.int32),
+            topology=jax.lax.stop_gradient(topology),
+            time=time,
+        )
     if topology is None and rebuild_fn is not None:
         topology = jax.lax.stop_gradient(rebuild_fn(positions, masses))
     topo_kw = {} if topology is None else {"topology": topology}

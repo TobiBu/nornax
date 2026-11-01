@@ -452,7 +452,7 @@ class FusedProviderForce:
 
         self.provider.engine.clear_prepared_state_cache()
 
-        seed = None if force_scale is None else (force_scale, None, None)
+        seed = self.seed(force_scale)
 
         @jax.jit
         def start(x, v, m, t, a, xa, fb):
@@ -482,6 +482,35 @@ class FusedProviderForce:
             topology=aux,
             time=time,
         )
+
+    @staticmethod
+    def seed(force_scale: Any = None) -> tuple | None:
+        """The value a first evaluation starts from: ``(force_scale, None, None)``.
+
+        ``None`` without a force scale (any MAC but ``dehnen_error``). Pass it as
+        the ``topology`` of :func:`~nornax.solvers.leapfrog_kdk.shooting_node`
+        or :func:`~nornax.solvers.leapfrog_kdk.initialize_block_state`, as
+        :meth:`initial_state` does with its ``force_scale``. Under
+        ``dehnen_error`` the force scale is per particle: the f_b of
+        ``provider.accelerations(topology, force_scale=True)`` on a full
+        prepare's topology, or the ``topology[0]`` a rollout carries (each
+        evaluation's f_b, which the NEXT rebuild reads). A node that is to
+        reproduce a rollout's step ``k`` bit for bit is seeded with the f_b of
+        step ``k - 1`` (``record_fn=lambda s: s.topology[0]``); seeded with step
+        ``k``'s own, its force differs at the force-error level, as a restart
+        does.
+
+        Parameters
+        ----------
+        force_scale : Any
+            The per-particle force scale, or ``None``.
+
+        Returns
+        -------
+        tuple | None
+            The provider's aux with only the force scale set, or ``None``.
+        """
+        return None if force_scale is None else (force_scale, None, None)
 
     @staticmethod
     def _aux(aux: Any) -> tuple:
