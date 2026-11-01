@@ -50,6 +50,7 @@ jobs:
           tests/integration/test_two_body.py
           tests/unit/test_direct_gravity.py
           tests/unit/test_jaccpot_adapter.py
+          tests/unit/test_potentials.py
 
       - name: Upload coverage XML artifact
         uses: actions/upload-artifact@v4

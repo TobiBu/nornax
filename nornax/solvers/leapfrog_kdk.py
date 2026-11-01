@@ -22,6 +22,8 @@ its own KDK leapfrog of step ``dt_max / 2**r`` -- one body, one timestep, no
 pairs to share a level with. The cached ``acc`` includes the field, so the rung
 assignment sees the total acceleration. An external force has no partner inside
 the system, so linear momentum then changes by exactly the external impulse.
+Analytic galaxy fields in this convention (Miyamoto-Nagai, NFW, Hernquist and their
+sum, the parameters in ``external_args``) are in :mod:`nornax.potentials`.
 """
 
 from __future__ import annotations
