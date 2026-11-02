@@ -178,6 +178,33 @@ and jaccpot's production runner bit for bit (with an external field on CPU, XLA
 rounds a few velocity components 1 ulp apart;
 `tests/integration/test_jaccpot_provider_rollout.py`).
 
+A multiple-shooting node on this force is `shooting_node(x, v, m, force,
+k_max=0, dt_max=dt, topology=FusedProviderForce.seed(f_b))`: it carries the
+evaluation's aux (verdict, count, force scale), so a rollout from it is the
+rollout from `initialize_block_state` bit for bit
+(`tests/integration/test_jaccpot_provider_shooting.py`).
+
+### Analytic galaxy potentials
+
+`nornax.potentials` has external fields in that convention with traced,
+differentiable parameters: `MiyamotoNagai` (`M`, `a`, `b`), `NFW` (`M` the
+characteristic mass `4 pi rho_0 r_s^3`, Odisseo's convention, and `r_s`),
+`Hernquist` (`M`, `a`) and their sum, `CompositePotential`, whose args is a dict
+of the components' parameters. `G = 1` (code units) unless given.
+
+```python
+from nornax.potentials import (
+    NFW, CompositePotential, MiyamotoNagai, MiyamotoNagaiParams, NFWParams,
+)
+
+galaxy = CompositePotential(disc=MiyamotoNagai(), halo=NFW())
+theta = {"disc": MiyamotoNagaiParams(M=1.0, a=3.0, b=0.3),
+         "halo": NFWParams(M=10.0, r_s=15.0)}
+final = leapfrog_kdk_rollout(
+    state, dt, force, n_steps=100, external_fn=galaxy, external_args=theta
+)  # differentiable in theta; galaxy.potential(x, t, theta) for energies
+```
+
 ## Planned Architecture
 
 - `nornax.state`: particle state and cached force derivatives

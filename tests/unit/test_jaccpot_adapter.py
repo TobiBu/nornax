@@ -12,7 +12,12 @@ import pytest
 import nornax.adapters.jaccpot as adapter
 from nornax.adapters import FusedProviderForce, JaccpotForceModel, JaccpotOptions
 from nornax.forces.mutual_direct import MutualDirectSumGravity
-from nornax.solvers.leapfrog_kdk import leapfrog_kdk_rollout
+from nornax.solvers.leapfrog_kdk import (
+    initialize_block_state,
+    leapfrog_kdk_rollout,
+    shooting_defect,
+    shooting_node,
+)
 from nornax.solvers.segments import retry_segment
 
 
@@ -605,3 +610,176 @@ def test_the_default_mode_carries_the_providers_aux_and_no_count() -> None:
     )
     assert len(final.topology) == 4 and FusedProviderForce.done(final) == 2
     assert FusedProviderForce(_DirectProvider(), differentiable=True).counts_done
+
+
+# --- shooting nodes on a rebuilding model (S10) --------------------------------------
+
+
+def _halo(positions, time, args):
+    """A softened point mass, its strength the field's traced argument."""
+    del time
+    r2 = jnp.sum(positions * positions, axis=-1, keepdims=True) + 0.25
+    return -args * positions / (r2 * jnp.sqrt(r2))
+
+
+class _ScaledProvider(_DirectProvider):
+    """``_DirectProvider`` whose force reads the seed's force scale, as a MAC would:
+    a wrong seed moves the acceleration (by up to 1e-2), so a test that says which
+    seed a node needs can fail."""
+
+    def _step(self, x, m, params, aux, guard):
+        acc, out = super()._step(x, m, params, aux, guard)
+        f_b_in = None if aux is None else aux[0]
+        if f_b_in is not None:
+            f_b = jax.lax.stop_gradient(f_b_in)[:, None]
+            acc = acc * (1 + 1e-2 * f_b / (1 + f_b))
+        return acc, out
+
+
+def _node(force, x, v, m, seed=None, **kw):
+    """A shooting node on ``force``: single-rung, seeded with ``seed``'s force scale."""
+    return shooting_node(
+        x, v, m, force, k_max=0, dt_max=0.01, topology=force.seed(seed), **kw
+    )
+
+
+_MODES = [
+    pytest.param(dict(), id="default"),
+    pytest.param(dict(count_done=True), id="count_done"),
+    pytest.param(dict(differentiable=True), id="differentiable"),
+]
+
+
+@pytest.mark.parametrize("scale_carry", [False, True], ids=["dehnen", "dehnen_error"])
+@pytest.mark.parametrize("mode", _MODES)
+def test_a_shooting_node_on_the_fused_provider_is_its_start_state(mode, scale_carry):
+    """The node carries the evaluation's aux, as ``initialize_block_state`` does, and a
+    rollout from it is that start's rollout bit for bit -- state and aux -- with an
+    external field and a time leaf; the aux is the scan's carry structure. Before
+    S10 the node dropped the aux (``topology`` stayed the seed) and the scan's
+    carry did not match."""
+    x, v, m = _cluster(seed=6)
+    force = FusedProviderForce(_ScaledProvider(scale_carry=scale_carry), **mode)
+    seed = 0.5 + jnp.arange(x.shape[0], dtype=x.dtype) if scale_carry else None
+    field = dict(external_fn=_halo, external_args=jnp.asarray(0.7))
+
+    def via_node(a, b, c):
+        node = _node(force, a, b, c, seed, time=0.25, base_index=3, **field)
+        return node, leapfrog_kdk_rollout(node, 0.01, force, n_steps=3, **field)
+
+    def via_start(a, b, c):
+        start = initialize_block_state(
+            a, b, c, force, time=0.25, topology=force.seed(seed), **field
+        )
+        start = start._replace(base_index=jnp.asarray(3, jnp.int32))
+        return start, leapfrog_kdk_rollout(start, 0.01, force, n_steps=3, **field)
+
+    (node, got), (start, want) = jax.jit(via_node)(x, v, m), jax.jit(via_start)(x, v, m)
+    for a, b in ((node, start), (got, want)):
+        assert jax.tree.structure(a) == jax.tree.structure(b)
+        for p, q in zip(jax.tree.leaves(a), jax.tree.leaves(b)):
+            assert p.dtype == q.dtype and np.array_equal(np.asarray(p), np.asarray(q))
+    assert len(node.topology) == (4 if force.counts_done else 3)
+    assert (node.topology[0] is not None) == scale_carry
+    assert jnp.array_equal(node.rung, jnp.zeros(x.shape[0], jnp.int32))
+    assert int(got.base_index) == 6 and float(got.time) == pytest.approx(0.28)
+    # eager, the node is the jitted one to round-off (no shared program)
+    eager = _node(force, x, v, m, seed, time=0.25, base_index=3, **field)
+    assert jnp.allclose(eager.acc, node.acc, rtol=1e-14, atol=0)
+
+
+def test_a_shooting_node_on_a_rebuilding_model_refuses_rungs_and_a_rebuild_fn():
+    """Single-rung and self-rebuilding, as ``initialize_block_state``."""
+    x, v, m = _cluster()
+    force = FusedProviderForce(_DirectProvider())
+    with pytest.raises(ValueError, match="k_max must be 0"):
+        shooting_node(x, v, m, force, k_max=1, dt_max=0.01)
+    with pytest.raises(ValueError, match="rebuild_fn None"):
+        shooting_node(x, v, m, force, k_max=0, dt_max=0.01, rebuild_fn=lambda p, q: p)
+    assert FusedProviderForce.seed(None) is None
+
+
+@pytest.mark.parametrize("scale_carry", [False, True], ids=["dehnen", "dehnen_error"])
+def test_chained_nodes_on_the_fused_provider_are_one_rollout(scale_carry):
+    """Node 0, two steps, node 1 at the end, two steps: the four-step rollout bit for
+    bit, and the defect at the seam exactly zero. Under ``dehnen_error`` node 1 is
+    seeded with the force scale step 1 handed step 2 (recorded), which is what the
+    long rollout's step 2 rebuilt with."""
+    x, v, m = _cluster(seed=7)
+    force = FusedProviderForce(
+        _ScaledProvider(scale_carry=scale_carry), differentiable=True
+    )
+    seed = 0.5 + jnp.arange(x.shape[0], dtype=x.dtype) if scale_carry else None
+
+    @jax.jit
+    def chain(a, b, c, which=0):
+        node0 = _node(force, a, b, c, seed)
+        mid, scales = leapfrog_kdk_rollout(
+            node0, 0.01, force, n_steps=2, record_fn=lambda s: s.topology[0]
+        )
+        node1 = _node(
+            force,
+            mid.positions,
+            mid.velocities,
+            c,
+            None if scales is None else scales[which],
+            base_index=mid.base_index,
+        )
+        end = leapfrog_kdk_rollout(node1, 0.01, force, n_steps=2)
+        long = leapfrog_kdk_rollout(node0, 0.01, force, n_steps=4)
+        return mid, node1, end, long
+
+    mid, node1, end, long = chain(x, v, m)
+    for name in ("positions", "velocities", "acc"):
+        assert jnp.array_equal(getattr(end, name), getattr(long, name)), name
+    assert jnp.array_equal(node1.acc, mid.acc)
+    assert all(
+        jnp.array_equal(d, jnp.zeros_like(d)) for d in shooting_defect(mid, node1)
+    )
+    # the count restarts at the node: the two segments' steps, each from zero
+    assert FusedProviderForce.done(end) == 2 and FusedProviderForce.done(long) == 4
+    if scale_carry:
+        # seeded with the scale of the evaluation AT the node (step 2's own): a
+        # restart's force, not the rollout's
+        _, wrong, _, _ = chain(x, v, m, 1)
+        assert not jnp.array_equal(wrong.acc, mid.acc)
+
+
+def test_a_shooting_objective_differentiates_through_the_node():
+    """``d/d(node positions, velocities, field strength)`` of a segment's loss, the
+    node built inside the loss: central differences, float64; and the node's aux is
+    severed (its force scale carries no cotangent back)."""
+    x, v, m = _cluster(seed=8)
+    # _DirectProvider: its force scale enters through a step (a MAC's choice, locally
+    # constant), so the severed scale is the whole map's gradient; _ScaledProvider's
+    # smooth dependence would put the scale's own derivative into the differences
+    force = FusedProviderForce(_DirectProvider(scale_carry=True), differentiable=True)
+    seed = 0.5 + jnp.arange(x.shape[0], dtype=x.dtype)
+
+    def loss(a, b, gm):
+        node = _node(force, a, b, m, seed, external_fn=_halo, external_args=gm)
+        end = leapfrog_kdk_rollout(
+            node,
+            0.01,
+            force,
+            n_steps=3,
+            checkpoint="step",
+            external_fn=_halo,
+            external_args=gm,
+        )
+        return jnp.sum(end.positions**2) + jnp.sum(end.velocities**2)
+
+    gm = jnp.asarray(0.7)
+    grads = jax.jit(jax.grad(loss, argnums=(0, 1, 2)))(x, v, gm)
+    loss_j = jax.jit(loss)
+    key = jax.random.PRNGKey(9)
+    for i, (arg, g) in enumerate(zip((x, v, gm), grads)):
+        d = jax.random.normal(jax.random.fold_in(key, i), jnp.shape(arg), x.dtype)
+        h = 1e-5
+        args = [x, v, gm]
+        plus, minus = list(args), list(args)
+        plus[i], minus[i] = arg + h * d, arg - h * d
+        fd = (loss_j(*plus) - loss_j(*minus)) / (2 * h)
+        assert abs(float(jnp.sum(g * d) - fd)) <= 1e-8 * max(1.0, abs(float(fd))), i
+    scale_grad = jax.grad(lambda a: jnp.sum(_node(force, a, v, m, seed).topology[0]))(x)
+    assert jnp.array_equal(scale_grad, jnp.zeros_like(x))
