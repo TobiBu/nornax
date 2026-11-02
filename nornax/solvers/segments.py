@@ -12,10 +12,18 @@ from its START state, so no overflowed step's result is ever kept.
 re-plan are the backend's business, so both come in as callbacks; the loop only
 guarantees the protocol: the start state is never consumed by a failed attempt,
 each re-plan sees every failure of the segment so far, and the number of retries
-is bounded. For jaccpot's fused provider the callbacks are
-:meth:`~nornax.adapters.jaccpot.FusedProviderForce.overflowed` and
-:meth:`~nornax.adapters.jaccpot.FusedProviderForce.replan`, which follow the
-runners' own policy (``FusedForceProvider.retry_mode``).
+is bounded -- by ``max_retries``, and past it by the attempts' progress when the
+backend can tell it (``progressed``). For jaccpot's fused provider the callbacks
+are :meth:`~nornax.adapters.jaccpot.FusedProviderForce.overflowed`,
+:meth:`~nornax.adapters.jaccpot.FusedProviderForce.replan` and
+:meth:`~nornax.adapters.jaccpot.FusedProviderForce.progressed`, which follow the
+runners' own rule: their policy (``FusedForceProvider.retry_mode``, at most two
+re-plans), then again while each re-run fits more steps than every earlier
+attempt, or fails at the same step needing more than the earlier attempt's
+lower-bound needs said (``_segment_retry_next``). The needs a failed attempt
+reports cover the steps up to its first failure only (later steps ran on a
+truncated force), so a segment whose needs grow step by step past a re-plan's
+headroom is learned one failing step at a time.
 """
 
 from __future__ import annotations
@@ -103,6 +111,7 @@ def retry_segment(
     replan: Replan,
     max_retries: int = 2,
     donates: bool = False,
+    progressed: Callable[[tuple[tuple[Any, Any], ...]], bool] | None = None,
 ) -> SegmentResult:
     """Run one rollout segment, re-planning and re-running it on overflow.
 
@@ -131,8 +140,8 @@ def retry_segment(
         (its cached acceleration recomputed by the new force, as a fresh start
         would be). ``None`` declines: nothing can be re-planned.
     max_retries : int
-        The most re-runs of one segment; jaccpot's runners allow two (the
-        ``replan`` callback may decline earlier).
+        The most re-runs of one segment that need no progress; jaccpot's
+        runners allow two (the ``replan`` callback may decline earlier).
     donates : bool
         ``run`` consumes its input (``jax.jit(..., donate_argnums=...)``), so the
         segment writes its end state into the start state's buffers -- what keeps
@@ -142,6 +151,15 @@ def retry_segment(
         sees is bitwise the one that was donated, except that its ``acc`` is
         ``None`` -- not copied, since ``replan`` re-evaluates it for the new
         force anyway.
+    progressed : Callable[[tuple[tuple[Any, Any], ...]], bool] | None
+        ``progressed(failures) -> bool``, on the host: whether the latest
+        failed attempt made progress over the earlier ones (``failures`` as
+        ``replan`` sees them, the latest last). Past ``max_retries`` the
+        segment is re-planned again exactly while it does; ``replan`` still
+        decides how, and may decline. The backend must make progress finite (a
+        count of fitted steps that grows within the segment's length, a
+        capacity that at least doubles toward an index bound). ``None`` (the
+        default): ``max_retries`` bounds every segment, as before.
 
     Returns
     -------
@@ -151,8 +169,9 @@ def retry_segment(
     Raises
     ------
     RuntimeError
-        When the attempt after ``max_retries`` re-runs still overflowed, or
-        ``replan`` declined.
+        When the attempt after ``max_retries`` re-runs still overflowed and
+        made no progress (or no ``progressed`` was given), or ``replan``
+        declined.
     """
     failures: list[tuple[Any, Any]] = []
     while True:
@@ -162,10 +181,13 @@ def retry_segment(
             return SegmentResult(final, records, force, len(failures))
         failures.append((final.topology, records))
         del final
-        if len(failures) > max_retries:
+        if len(failures) > max_retries and not (
+            progressed is not None and progressed(tuple(failures))
+        ):
             raise RuntimeError(
-                f"the segment still overflowed after {max_retries} re-planned "
-                "re-runs"
+                f"the segment still overflowed after {len(failures) - 1} "
+                "re-planned re-runs"
+                + ("" if progressed is None else ", the last without progress")
             )
         if kept is not None:
             state = _restore(kept)

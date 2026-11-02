@@ -140,7 +140,8 @@ def main() -> int:
     )[
         0
     ]  # the eager topology (the eager tree) is dropped, as the runner drops it
-    force = FusedProviderForce(prov)
+    # the done count: the runners' retry past their policy (`progressed`)
+    force = FusedProviderForce(prov, count_done=True)
     state = force.initial_state(x0, v0, m, args=params, external_fn=external_fn)
     jax.block_until_ready(state.acc)
     del x0, v0
@@ -181,6 +182,7 @@ def main() -> int:
             replan=lambda f_in, start, failures: f_in.replan(
                 start, failures, args=params, external_fn=external_fn
             ),
+            progressed=FusedProviderForce.progressed,
             donates=bool(args.donate_state),
         )
 
