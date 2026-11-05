@@ -279,3 +279,51 @@ def test_an_overflowing_segment_is_replanned_and_matches_a_fitting_run(plummer):
     want = _segment(want_force, False)(_start(want_force, x, v, m, False))
     for name in ("positions", "velocities", "acc"):
         assert _differ(getattr(got.state, name), getattr(want, name)) == 0, name
+
+
+# --------------------------------------------------------------------------
+# nornax.schemes.LeapfrogKDK in jaccpot's ProductionRunner (multi-node plan I1)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("form", ["static", "traced", "halo"])
+def test_the_runner_with_the_kdk_scheme_is_the_builtin_runner(form, plummer):
+    """``ProductionRunner(scheme=LeapfrogKDK())`` IS the built-in runner, bit for
+    bit (positions, velocities and the handle's forces), so moving the scheme from
+    jaccpot to nornax moves no bits; and it is this module's nornax rollout."""
+    from jaccpot.production import GalaxySettings, ProductionRunner, SegmentConfig
+    from jaccpot.scheme import SplitStepScheme
+
+    from nornax import LeapfrogKDK
+
+    assert isinstance(LeapfrogKDK(), SplitStepScheme)
+    x, v, m = (plummer[k] for k in ("x", "v", "m"))
+    field = None
+    if form == "halo":
+
+        def field(rows):
+            return _halo(rows[:, 0], None, _HALO_ARGS)
+
+    segment = SegmentConfig(
+        steps=2, traced_params=form != "static", diagnostics_every=0
+    )
+
+    def run(scheme):
+        runner = ProductionRunner(
+            _solver(),
+            settings=GalaxySettings(leaf_size=LEAF, max_order=ORDER, theta=THETA),
+            segment=segment,
+            external_acceleration_fn=field,
+            scheme=scheme,
+        )
+        return runner.run(jnp.stack([x, v], axis=1), m, dt=DT, num_steps=STEPS)
+
+    want, got = run(None), run(LeapfrogKDK())
+    assert _differ(got.state, want.state) == 0
+    assert _differ(got.handle.self_acceleration, want.handle.self_acceleration) == 0
+    if form == "static":
+        rollout = _segment(plummer["force"], False)(
+            _start(plummer["force"], x, v, m, False)
+        )
+        assert _differ(rollout.positions, np.asarray(got.state)[:, 0]) == 0
+        assert _differ(rollout.velocities, np.asarray(got.state)[:, 1]) == 0
