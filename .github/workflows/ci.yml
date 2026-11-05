@@ -57,3 +57,53 @@ jobs:
         with:
           name: coverage-xml-py${{ matrix.python-version }}
           path: coverage.xml
+
+  # The jaccpot-backed tests (mimirax's solver-tests pattern). The job above installs
+  # no jaccpot, so every test that imports it is skipped there; this one installs
+  # jaccpot and yggdrax from GitHub at PINNED commits and runs those tests on CPU in
+  # float64 (the fused-lane files run their Pallas kernels in interpret mode).
+  #
+  # PINS: jaccpot main 1bb30620 (2026-11-05, #502: forward mode, the custom_jvp
+  # seams test_jaccpot_provider_gradients' jvp fixture uses) and yggdrax ac87500
+  # (#106, what jaccpot's gates were measured on). Bump them together: jaccpot's
+  # `yggdrax>=0.0.1` and jax window (>=0.11.2,<0.12) are what the resolver reconciles.
+  # Local (2026-11-05, jax 0.11.2, one process): 77 passed, 31 min, 10.6 GB RSS.
+  solver-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      YGGDRAX_REF: ac875003282e9e95c4b9e4427c56ae0a2e834181
+      JACCPOT_REF: 1bb30620f4486582d4787101adbf2809c854c054
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          # jaccpot requires Python >= 3.12.
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install nornax + jaccpot and yggdrax at the pinned commits
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" \
+            "yggdrax @ git+https://github.com/TobiBu/yggdrax.git@${YGGDRAX_REF}" \
+            "jaccpot @ git+https://github.com/TobiBu/jaccpot.git@${JACCPOT_REF}"
+          python -c "import jax, jaccpot, yggdrax; print('jax', jax.__version__)"
+
+      - name: The jaccpot-backed tests (CPU)
+        run: >-
+          pytest -o addopts="" --no-header -q
+          tests/unit/test_segments.py
+          tests/unit/test_leapfrog_hooks.py
+          tests/unit/test_jaccpot_adapter.py
+          tests/integration/test_jaccpot_adapter_smoke.py
+          tests/integration/test_fused_boundary_rollout.py
+          tests/integration/test_jaccpot_provider_gradients.py
+          tests/integration/test_jaccpot_provider_shooting.py
+          tests/integration/test_jaccpot_provider_rollout.py
