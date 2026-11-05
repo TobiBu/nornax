@@ -403,6 +403,29 @@ def test_the_differentiable_rollout_matches_central_differences(checkpoint) -> N
         assert abs(float(jnp.sum(g * d) - fd)) <= 1e-8 * max(1.0, abs(float(fd)))
 
 
+@pytest.mark.parametrize("checkpoint", [False, "step", "nested"])
+def test_the_differentiable_rollout_has_a_jvp(checkpoint) -> None:
+    """Forward mode: ``jax.jvp`` through ``differentiable=True`` (the provider's
+    ``differentiable_step`` carries a JVP since jaccpot's ``ad_mode="forward"``,
+    main 1bb30620) is the reverse gradient's transpose, ``<J^T 1, d> == J d`` for
+    the scalar loss, in every checkpoint mode; the default mode's ``step`` stays
+    forward-only under a jvp as well."""
+    x, v, m = _cluster(seed=5)
+    force = FusedProviderForce(_DirectProvider(), differentiable=True)
+    loss = jax.jit(lambda b, c: _rollout_loss(force, x, b, c, checkpoint=checkpoint)[0])
+    gv, gm = jax.jit(jax.grad(loss, argnums=(0, 1)))(v, m)
+    key = jax.random.PRNGKey(6)
+    dv = jax.random.normal(key, v.shape, v.dtype)
+    dm = jax.random.normal(jax.random.fold_in(key, 1), m.shape, m.dtype) * m
+    value, tangent = jax.jit(lambda a, b: jax.jvp(loss, (a, b), (dv, dm)))(v, m)
+    assert abs(float(value - loss(v, m))) <= 1e-14 * abs(float(value))
+    adjoint = jnp.sum(gv * dv) + jnp.sum(gm * dm)
+    assert abs(float(tangent - adjoint)) <= 1e-12 * abs(float(adjoint))
+    plain = FusedProviderForce(_DirectProvider())
+    with pytest.raises(TypeError, match="JVP with aliasing"):
+        jax.jvp(lambda b: _rollout_loss(plain, x, b, m)[0], (v,), (dv,))
+
+
 def test_the_aux_counts_the_steps_that_fitted_before_the_first_failure() -> None:
     """``done``: the start force does not count; each step adds one while every
     evaluation so far fitted, and none after the first that did not."""
