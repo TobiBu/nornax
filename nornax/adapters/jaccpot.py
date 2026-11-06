@@ -316,6 +316,19 @@ class FusedProviderForce:
     (one 40 B/p carry per chunk); the gradient finite and bitwise the same on
     a second evaluation.
 
+    **Forward mode.** ``jax.jvp`` / ``jax.jacfwd`` / ``jax.linearize`` through a
+    ``differentiable=True`` rollout work on jaccpot's large-N lane (main
+    1bb30620 on: the seams' ``custom_jvp`` siblings, ``ad_mode="forward"``) when
+    every trace -- the rollout's, and :meth:`initial_state`'s own jitted start
+    force -- runs inside ``jaccpot.runtime.grad_options.ad_mode_override(
+    "forward")``; the mode is read at trace time and keys ``jax.jit``'s cache,
+    so call the jitted programs inside it too. Use ``checkpoint=False`` or
+    ``"step"`` (a jvp through ``jax.checkpoint`` stores no residuals, so both
+    are the plain scan's memory; ``"nested"`` buys nothing for a jvp).
+    The forward is ``step``'s bit for bit; it is first order only (no
+    ``jacfwd(jacfwd)``, no ``jax.grad`` of a forward-mode program), and the
+    default mode's ``provider.step`` stays forward-only.
+
     Attributes
     ----------
     provider : Any
