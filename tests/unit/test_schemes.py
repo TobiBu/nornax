@@ -26,6 +26,21 @@ from nornax.solvers.leapfrog_kdk import (
 
 STEPS, DT = 8, 1e-2
 
+#: jaccpot's window (Python >= 3.12, JAX >= 0.11.2) is where the runner runs and
+#: where the scan and the rollout compile to the same bits. Older JAX (CI's
+#: Python 3.11 job resolves 0.10.2) fuses the two programs differently and moves
+#: the last bits of the velocities; there the claim is equality to round-off.
+_BITWISE = tuple(jax.__version_info__[:3]) >= (0, 11, 2)
+
+
+def _same(got, want) -> None:
+    if _BITWISE:
+        assert np.array_equal(np.asarray(got), np.asarray(want))
+    else:
+        np.testing.assert_allclose(
+            np.asarray(got), np.asarray(want), rtol=1e-12, atol=1e-14
+        )
+
 
 def _system(n: int = 64):
     rng = np.random.default_rng(0)
@@ -69,9 +84,9 @@ def test_the_scheme_scan_is_the_rollout() -> None:
         )
     )(start)
     state, acc = run(jnp.stack([x, v], axis=1), start.acc)
-    assert np.array_equal(np.asarray(state[:, 0]), np.asarray(want.positions))
-    assert np.array_equal(np.asarray(state[:, 1]), np.asarray(want.velocities))
-    assert np.array_equal(np.asarray(acc), np.asarray(want.acc))
+    _same(state[:, 0], want.positions)
+    _same(state[:, 1], want.velocities)
+    _same(acc, want.acc)
 
 
 def test_the_halves_are_the_expressions() -> None:
