@@ -42,6 +42,7 @@ from .potentials import (  # noqa: E402
     NFWParams,
     nfw_mass_from_virial,
 )
+from .schemes import LeapfrogKDK  # noqa: E402
 from .solve import (  # noqa: E402
     solve_adaptive_hermite4,
     solve_adaptive_hermite4_to_time,
@@ -74,6 +75,7 @@ __all__ = [
     "HernquistParams",
     "JaccpotForceModel",
     "JaccpotOptions",
+    "LeapfrogKDK",
     "MiyamotoNagai",
     "MiyamotoNagaiParams",
     "MutualDirectSumGravity",

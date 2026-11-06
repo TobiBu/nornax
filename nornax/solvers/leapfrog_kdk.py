@@ -286,13 +286,66 @@ def initialize_block_state(
     )
 
 
+def drift_positions(positions: Vec3, velocities: Vec3, acc: Vec3, dt: Any) -> Vec3:
+    """The KDK step's positions: the opening half-kick and the full drift.
+
+    ``x + v dt + 0.5 a dt**2``, the velocity-Verlet form of ``K(dt/2) D(dt)``:
+    jaccpot's fused runner's expression, operand for operand (see
+    :func:`leapfrog_kdk_step`). The one place nornax writes it; the rollouts and
+    :class:`nornax.schemes.LeapfrogKDK` (the scheme jaccpot's production runner
+    takes) all call it, so moving a loop between them moves no bits.
+
+    Parameters
+    ----------
+    positions : Vec3
+        At the step's start.
+    velocities : Vec3
+        At the step's start.
+    acc : Vec3
+        The total acceleration at the step's start.
+    dt : Any
+        The step.
+
+    Returns
+    -------
+    Vec3
+        The positions the step's force is evaluated at.
+    """
+    return positions + velocities * dt + 0.5 * acc * dt**2
+
+
+def kick_velocities(velocities: Vec3, acc: Vec3, acc_new: Vec3, dt: Any) -> Vec3:
+    """The KDK step's velocities: both half-kicks, folded.
+
+    ``v + 0.5 (a + a') dt`` with ``a`` the acceleration at the step's start and
+    ``a'`` at its end: jaccpot's fused runner's expression
+    (``fmm_state._velocity_verlet_kick_drifted``), operand for operand.
+
+    Parameters
+    ----------
+    velocities : Vec3
+        At the step's start.
+    acc : Vec3
+        The total acceleration at the step's start positions.
+    acc_new : Vec3
+        The total acceleration at its end positions.
+    dt : Any
+        The step.
+
+    Returns
+    -------
+    Vec3
+        The velocities at the step's end.
+    """
+    return velocities + 0.5 * (acc + acc_new) * dt
+
+
 def _drift(state: BlockStepState, dt: Any) -> Vec3:
     """The positions after the opening half-kick and the full drift.
 
-    ``x + v dt + 0.5 a dt**2`` with the cached ``a``: jaccpot's fused runner's
-    expression, operand for operand (see :func:`leapfrog_kdk_step`).
+    :func:`drift_positions` with the cached ``a`` (see :func:`leapfrog_kdk_step`).
     """
-    return state.positions + state.velocities * dt + 0.5 * state.acc * dt**2
+    return drift_positions(state.positions, state.velocities, state.acc, dt)
 
 
 def _force_kick(
@@ -319,7 +372,7 @@ def _force_kick(
         acc = acc + _external_acceleration(external_fn, positions, time, external_args)
     return BlockStepState(
         positions=positions,
-        velocities=state.velocities + 0.5 * (state.acc + acc) * dt,
+        velocities=kick_velocities(state.velocities, state.acc, acc, dt),
         masses=state.masses,
         acc=acc,
         rung=state.rung,

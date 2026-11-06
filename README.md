@@ -184,6 +184,46 @@ evaluation's aux (verdict, count, force scale), so a rollout from it is the
 rollout from `initialize_block_state` bit for bit
 (`tests/integration/test_jaccpot_provider_shooting.py`).
 
+### Schemes for jaccpot's production runner
+
+nornax owns the integration schemes; jaccpot's `ProductionRunner` owns the force
+and the run (segments, re-plans and retries, restarts, diagnostics). The runner
+takes a scheme through its structural protocol `jaccpot.scheme.SplitStepScheme`:
+each step of its segment scan is cut at the step's one force evaluation,
+
+```
+state_open = scheme.open_step(state, acceleration, dt)       # nornax
+acceleration_new = the runner's force at state_open[:, 0]    # jaccpot
+state_new = scheme.close_step(state_open, acceleration, acceleration_new, dt)
+```
+
+on the runner's packed `[N, 2, 3]` carry. `nornax.schemes.LeapfrogKDK` is the
+KDK leapfrog in that shape. It calls the same `drift_positions` /
+`kick_velocities` as `leapfrog_kdk_step` and `leapfrog_kdk_rollout`, which are
+jaccpot's built-in expressions operand for operand, so the runner with it is the
+runner without it, bit for bit (`tests/integration/test_jaccpot_provider_rollout.py`,
+`tests/unit/test_schemes.py`).
+
+```python
+from jaccpot import FastMultipoleMethod, ProductionRunner
+from jaccpot.production import GALAXY_SETTINGS
+from nornax import LeapfrogKDK
+
+runner = ProductionRunner(
+    FastMultipoleMethod(preset="galaxy", softening=1.5e-3),
+    settings=GALAXY_SETTINGS,
+    scheme=LeapfrogKDK(),
+)
+result = runner.run(state, masses, dt=1e-3, num_steps=1000)
+```
+
+A scheme is a frozen value: its `key()` is part of the runner's compile keys,
+and `rowwise=True` lets the runner hand it rows in any order (its tree-order
+carry; the multi-GPU shards in a later step). The hybrid Hermite scheme for
+collisional subsystems planned for globular clusters in a live galaxy fits the
+same cut: its `open_step` integrates the direct-sum subsystems with Hermite
+between the long-range half-kicks.
+
 ### Analytic galaxy potentials
 
 `nornax.potentials` has external fields in that convention with traced,
