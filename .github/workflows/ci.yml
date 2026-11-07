@@ -107,3 +107,4 @@ jobs:
           tests/integration/test_jaccpot_provider_gradients.py
           tests/integration/test_jaccpot_provider_shooting.py
           tests/integration/test_jaccpot_provider_rollout.py
+          tests/integration/test_jaccpot_sharded.py

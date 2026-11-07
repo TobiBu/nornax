@@ -43,6 +43,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from nornax._typing import IntPerParticle, PerParticle, ScalarLike, Vec3
 from nornax.blockstep.schedule import (
@@ -64,6 +65,7 @@ __all__ = [
     "assert_fused_boundary_selected",
     "check_mutual_force_model",
     "check_rung_range",
+    "check_sharded_force_model",
     "relative_momentum",
 ]
 
@@ -495,3 +497,301 @@ def check_mutual_force_model(
     return ConformanceReport(
         checks, fused_selected=fused is not None, scanned_boundaries=scanned
     )
+
+
+# ----------------------------------------------------------------------
+# Sharded force models (multi-node plan I2).
+# ----------------------------------------------------------------------
+
+
+def _sharded_accelerations(force: Any, layout: dict, mesh: Any, carry: Any) -> tuple:
+    """One evaluation of a sharded force on a flat layout: ``(acc, potential)``."""
+    import contextlib
+
+    from jax.sharding import PartitionSpec as P
+
+    axis = force.axis_name
+    spec = P(axis)
+    has_carry = carry is not None
+    has_potential = callable(getattr(force, "shard_potential", None))
+
+    def body(pos: Any, m: Any, ids: Any, live: Any, carry_d: Any) -> tuple:
+        if has_carry:
+            carry_d = jax.tree_util.tree_map(lambda leaf: leaf[0], carry_d)
+        acc, _ = force.shard_accelerations(pos, m, ids, live, carry=carry_d)
+        phi = (
+            force.shard_potential(pos, m, ids, live, carry=carry_d)
+            if has_potential
+            else jnp.zeros(m.shape, pos.dtype)
+        )
+        return acc, phi
+
+    carry_spec = (
+        None if not has_carry else jax.tree_util.tree_map(lambda _: spec, carry)
+    )
+    program = jax.jit(
+        jax.shard_map(
+            body,
+            mesh=mesh,
+            in_specs=(spec, spec, spec, spec, carry_spec),
+            out_specs=(spec, spec),
+            check_vma=False,
+        )
+    )
+    context = getattr(force, "context", None)
+    with context() if callable(context) else contextlib.nullcontext():
+        acc, phi = program(
+            jnp.asarray(layout["state"][:, 0]),
+            jnp.asarray(layout["masses"]),
+            jnp.asarray(layout["ids"]),
+            jnp.asarray(layout["live_rows"]),
+            carry,
+        )
+    return acc, (phi if has_potential else None)
+
+
+def check_sharded_force_model(
+    force: Any,
+    state: Any,
+    masses: Any,
+    mesh: Any,
+    *,
+    cap: int | None = None,
+    carry: Any = None,
+    oracle_accelerations: Any = None,
+    oracle_tolerance: float = 1.0e-12,
+    layout_tolerance: float = 1.0e-12,
+    momentum_tolerance: float | None = 1.0e-12,
+    scheme: Any = None,
+    rollout_steps: int = 4,
+    rollout_dt: float = 1.0e-2,
+    rollout_tolerance: float = 1.0e-10,
+    reference_force: Any = None,
+    reference_carry: Any = None,
+    seed: int = 0,
+) -> ConformanceReport:
+    """Run the sharded protocol's contract checks on ``force`` (I2).
+
+    ``state`` / ``masses`` are the system by id; ``mesh`` is a 1-D mesh on the
+    force's ``axis_name``. The checks, in the order they appear in the report:
+
+    * ``protocol`` -- ``isinstance(force, nornax.sharded.ShardedForceModel)``.
+    * ``shape/finite`` -- ``(ndev * cap, 3)``, all finite.
+    * ``padding rows zero`` -- the acceleration (and the potential, if the model
+      has ``shard_potential``) is exactly zero on padding rows.
+    * ``layout`` -- the same particles in another row layout (a random
+      permutation over the devices) give the same accelerations by id, relative
+      L2 under ``layout_tolerance``: a particle's force must not depend on which
+      device holds it.
+    * ``momentum`` -- :func:`relative_momentum` of the self-gravity
+      (``momentum_tolerance=None`` skips it: a far-field approximation conserves
+      momentum only to its accuracy).
+    * ``oracle`` -- against ``oracle_accelerations`` (``(N, 3)`` by id), when given.
+    * ``mesh_sum order`` -- :func:`nornax.sharded.mesh_sum` equals the host's
+      fold of the per-device values in mesh order, bitwise.
+    * ``rollout`` -- with ``scheme`` (``None``: :class:`nornax.schemes.LeapfrogKDK`),
+      :func:`nornax.sharded.sharded_split_step_rollout` on ``mesh`` against the
+      same rollout of ``reference_force`` (default: ``force`` itself) on the
+      mesh's first device alone, by id, relative L2 under ``rollout_tolerance``
+      (``rollout_steps=0`` skips it).
+
+    ``carry``, if the model needs one, is its first carry for the contiguous
+    layout (leading ``ndev`` axis); the layout check reuses it, so it applies
+    only to models whose carry does not depend on the row layout
+    (``layout_tolerance=None`` skips it). ``reference_carry`` is the reference's
+    (leading axis 1). A backend bound to one mesh (prepared there) passes a
+    ``reference_force`` built for one device.
+
+    Parameters
+    ----------
+    force : Any
+        The model under test.
+    state : Any
+        ``(N, 2, 3)`` by id.
+    masses : Any
+        ``(N,)``.
+    mesh : Any
+        A 1-D mesh on ``force.axis_name``.
+    cap : int | None
+        Rows per device (``None``: the largest chunk; give more to test padding).
+    carry : Any
+        The model's first carry (leading ``ndev`` axis), or ``None``.
+    oracle_accelerations : Any
+        ``(N, 3)`` reference accelerations by id, or ``None``.
+    oracle_tolerance : float
+        Relative L2 bound against the oracle.
+    layout_tolerance : float
+        Relative L2 bound between two row layouts (``None`` skips).
+    momentum_tolerance : float | None
+        Bound on the momentum residual (``None`` skips).
+    scheme : Any
+        The rollout's scheme (``None``: ``LeapfrogKDK``).
+    rollout_steps : int
+        Steps of the rollout check (``0`` skips it).
+    rollout_dt : float
+        Its step.
+    rollout_tolerance : float
+        Relative L2 bound, mesh rollout against one device.
+    reference_force : Any
+        The one-device rollout's model (``None``: ``force``).
+    reference_carry : Any
+        Its first carry (leading axis 1), or ``None``.
+    seed : int
+        The shuffled layout's and the ``mesh_sum`` probe's seed.
+
+    Returns
+    -------
+    ConformanceReport
+        The measured table.
+    """
+    from nornax.schemes import LeapfrogKDK
+    from nornax.sharded import (
+        ShardedForceModel,
+        decompose_rows,
+        gather_by_id,
+        mesh_sum,
+        sharded_split_step_rollout,
+    )
+
+    checks: list[CheckResult] = []
+    is_model = isinstance(force, ShardedForceModel)
+    checks.append(
+        CheckResult(
+            "protocol",
+            is_model,
+            detail="isinstance(force, nornax.sharded.ShardedForceModel)",
+        )
+    )
+    if not is_model:
+        return ConformanceReport(checks=checks)
+    state = np.asarray(state)
+    masses = np.asarray(masses)
+    n = int(state.shape[0])
+    ndev = int(mesh.devices.size)
+    layout = decompose_rows(state, masses, ndev, cap=cap)
+    cap = int(layout["ids"].shape[0]) // ndev
+    acc, phi = _sharded_accelerations(force, layout, mesh, carry)
+    acc_h = np.asarray(acc)
+    well_formed = acc_h.shape == (ndev * cap, 3) and bool(np.all(np.isfinite(acc_h)))
+    checks.append(
+        CheckResult(
+            "shape/finite",
+            well_formed,
+            detail=f"shape {acc_h.shape}, dtype {acc_h.dtype}",
+        )
+    )
+    pad = ~layout["live_rows"]
+    pad_max = float(np.abs(acc_h[pad]).max()) if pad.any() else 0.0
+    if phi is not None and pad.any():
+        pad_max = max(pad_max, float(np.abs(np.asarray(phi)[pad]).max()))
+    checks.append(
+        CheckResult(
+            "padding rows zero",
+            pad_max == 0.0,
+            pad_max,
+            detail=f"{int(pad.sum())} padding rows",
+        )
+    )
+    by_id = gather_by_id({"acc": acc_h}, layout["ids"], layout["live_rows"], n)["acc"]
+    if layout_tolerance is not None:
+        order = np.random.default_rng(seed).permutation(n)
+        shuffled = decompose_rows(state, masses, ndev, cap=cap, order=order)
+        acc_s, _ = _sharded_accelerations(force, shuffled, mesh, carry)
+        by_id_s = gather_by_id(
+            {"acc": np.asarray(acc_s)}, shuffled["ids"], shuffled["live_rows"], n
+        )["acc"]
+        residual = _relative_l2(by_id_s, by_id)
+        checks.append(
+            CheckResult(
+                "layout",
+                residual < layout_tolerance,
+                residual,
+                layout_tolerance,
+                "by-id force, shuffled rows vs contiguous",
+            )
+        )
+    if momentum_tolerance is not None:
+        residual = relative_momentum(jnp.asarray(masses), jnp.asarray(by_id))
+        checks.append(
+            CheckResult(
+                "momentum", residual < momentum_tolerance, residual, momentum_tolerance
+            )
+        )
+    if oracle_accelerations is not None:
+        residual = _relative_l2(by_id, np.asarray(oracle_accelerations))
+        checks.append(
+            CheckResult(
+                "oracle",
+                residual < oracle_tolerance,
+                residual,
+                oracle_tolerance,
+                "by id",
+            )
+        )
+    # mesh_sum: mesh order, bitwise the host's fold
+    from jax.sharding import PartitionSpec as P
+
+    # magnitudes apart, so another summation order shows in the last bits
+    values = np.random.default_rng(seed + 1).normal(size=(ndev, 3))
+    values = values * 10.0 ** np.arange(ndev)[:, None]
+    summed = jax.jit(
+        jax.shard_map(
+            lambda v: mesh_sum(v[0], force.axis_name),
+            mesh=mesh,
+            in_specs=P(force.axis_name),
+            out_specs=P(),
+            check_vma=False,
+        )
+    )(jnp.asarray(values))
+    fold = values[0]
+    for i in range(1, ndev):
+        fold = fold + values[i]
+    differ = int(np.sum(np.asarray(summed) != fold))
+    checks.append(
+        CheckResult(
+            "mesh_sum order",
+            differ == 0,
+            float(differ),
+            detail="elements differing from the host fold",
+        )
+    )
+    if rollout_steps:
+        scheme = LeapfrogKDK() if scheme is None else scheme
+        one = jax.sharding.Mesh(
+            np.asarray(mesh.devices).reshape(-1)[:1], (force.axis_name,)
+        )
+        ref_layout = decompose_rows(state, masses, 1)
+        results = []
+        reference = force if reference_force is None else reference_force
+        for model, m, lay, k in (
+            (force, mesh, layout, carry),
+            (reference, one, ref_layout, reference_carry),
+        ):
+            out = sharded_split_step_rollout(
+                scheme,
+                model,
+                jnp.asarray(lay["state"]),
+                jnp.asarray(lay["masses"]),
+                jnp.asarray(lay["ids"]),
+                jnp.asarray(lay["live_rows"]),
+                dt=rollout_dt,
+                steps=int(rollout_steps),
+                mesh=m,
+                carry=k,
+            )
+            results.append(
+                gather_by_id({"state": out["state"]}, lay["ids"], lay["live_rows"], n)[
+                    "state"
+                ]
+            )
+        residual = _relative_l2(results[0], results[1])
+        checks.append(
+            CheckResult(
+                "rollout",
+                residual < rollout_tolerance,
+                residual,
+                rollout_tolerance,
+                f"{type(scheme).__name__}, {rollout_steps} steps, {ndev} devices vs 1",
+            )
+        )
+    return ConformanceReport(checks=checks)
