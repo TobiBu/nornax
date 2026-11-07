@@ -224,6 +224,38 @@ collisional subsystems planned for globular clusters in a live galaxy fits the
 same cut: its `open_step` integrates the direct-sum subsystems with Hermite
 between the long-range half-kicks.
 
+### Sharded forces: one device's rows inside `shard_map` (multi-node plan I2)
+
+`nornax.sharded` is the protocol for a force evaluated per device on a 1-D mesh. Each
+device holds `cap` rows, `live_rows` of them particles and the rest padding with zero
+mass. Nothing in it imports jaccpot.
+
+```python
+from nornax.sharded import ShardedForceModel  # structural protocol
+# acc, carry = force.shard_accelerations(positions, masses, ids, live_rows, carry=carry)
+```
+
+- **Force:** `ShardedForceModel` reaches other devices through collectives on its
+  `axis_name`. Its per-device `carry` rides in the scan, like `RebuildingForceModel`'s
+  topology. `ShardedDirectSumGravity` is the toy implementation (all-gathered sources,
+  summed in id order). jaccpot's `jaccpot.distributed.sharded_force.ShardedMeshForce`
+  wraps its fused multi-GPU force.
+- **Diagnostics:** `mesh_sum` and `mesh_moments` all-gather the per-device values and
+  fold them in mesh order, so 1 process x N devices and N processes x 1 device give the
+  same bits.
+- **I/O by id:** `gather_by_id`, `decompose_rows`, and `is_writer` (process 0 writes).
+- **Schemes:** a `rowwise` scheme (`LeapfrogKDK`) runs per device unchanged. A scheme
+  that reads other rows declares a mesh form (`open_step_shard` / `close_step_shard`,
+  given `live_rows` and `axis_name`) and reduces with `mesh_sum`.
+- **Drivers:** `sharded_split_step_rollout` is the reference driver. jaccpot's
+  `ProductionRunner(mesh=..., scheme=LeapfrogKDK())` is the production one, bitwise to
+  its built-in KDK.
+- **Conformance:** `nornax.conformance.check_sharded_force_model` checks the protocol,
+  that padding rows get exactly zero, layout independence by id, momentum, an optional
+  oracle, the `mesh_sum` order, and the scheme's rollout on the mesh against one device.
+  `tests/unit/test_sharded.py` runs it on 2 and 4 forced CPU devices;
+  `tests/integration/test_jaccpot_sharded.py` runs it on jaccpot's force.
+
 ### Analytic galaxy potentials
 
 `nornax.potentials` has external fields in that convention with traced,
