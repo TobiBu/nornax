@@ -243,7 +243,11 @@ def test_the_rollout_is_the_particle_carry_and_the_runner(nornax_run):
         assert _differ(final.positions, want[:, 0]) == 0
         if nornax_run["external"]:
             got, ref = np.asarray(final.velocities), want[:, 1]
-            assert np.all(np.abs(got - ref) <= 2 * np.spacing(np.abs(ref)))
+            ulp = np.abs(got - ref) / np.spacing(np.abs(ref))
+            assert np.all(ulp <= 2), (
+                f"velocities: max {ulp.max():.1f} ulp, {int(np.sum(ulp > 2))} of "
+                f"{ulp.size} entries above 2 ulp, {int(np.sum(ulp > 0))} differ"
+            )
         else:
             assert _differ(final.velocities, want[:, 1]) == 0
     if not nornax_run["external"]:
