@@ -129,5 +129,6 @@ class LeapfrogKDK:
                 jnp.asarray(acceleration, dtype=dtype),
                 jnp.asarray(acceleration_new, dtype=dtype),
                 jnp.asarray(dt, dtype=dtype),
+                self.drift_order,
             )
         )
