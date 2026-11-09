@@ -74,8 +74,8 @@ jobs:
     env:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
-      YGGDRAX_REF: 8289a4e925e0085dada616155dd1514de3ec01f8
-      JACCPOT_REF: cc90bb6f8245892fcc93ccc9efbe0a665e7e3e6c
+      YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
+      JACCPOT_REF: 760f500c23b27fd0d92ed468eaafe3a3c20016b3
 
     steps:
       - name: Checkout
