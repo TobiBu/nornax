@@ -185,7 +185,8 @@ def test_the_rollout_is_a_verlet_scan_over_the_providers_step(nornax_run):
 
     def verlet(carry, m_now):
         x_now, v_now, a_now, aux = carry
-        x_now = x_now + v_now * dt + 0.5 * a_now * dt**2
+        # the summed drift (A3): drift_positions' expression, operand for operand
+        x_now = x_now + dt * (v_now + (0.5 * dt) * a_now)
         a_new, aux = total(x_now, m_now, aux)
         return (x_now, v_now + 0.5 * (a_now + a_new) * dt, a_new, aux), None
 
