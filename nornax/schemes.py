@@ -31,7 +31,7 @@ from typing import Any
 
 import jax.numpy as jnp
 
-from nornax.solvers.leapfrog_kdk import drift_positions, kick_velocities
+from nornax.solvers.leapfrog_kdk import DRIFT_ORDERS, drift_positions, kick_velocities
 
 __all__ = ["LeapfrogKDK"]
 
@@ -49,9 +49,21 @@ class LeapfrogKDK:
     rowwise : bool
         ``True``: each row's update reads only that row, so jaccpot's tree-order
         carry and (I2) a mesh shard may hand it rows in any order.
+    drift_order : str
+        :func:`~nornax.solvers.leapfrog_kdk.drift_positions`'s order:
+        ``"summed"`` (the default since A3: jaccpot's built-in drift, bit for bit)
+        or ``"legacy"`` (the expression before A3; jaccpot's
+        ``GalaxySettings(drift_order="legacy")``).
     """
 
     rowwise: bool = True
+    drift_order: str = "summed"
+
+    def __post_init__(self) -> None:
+        if self.drift_order not in DRIFT_ORDERS:
+            raise ValueError(
+                f"drift_order must be one of {DRIFT_ORDERS}, got {self.drift_order!r}"
+            )
 
     def key(self) -> Hashable:
         """The compile-key part: the scheme's name (it has no parameters).
@@ -59,9 +71,12 @@ class LeapfrogKDK:
         Returns
         -------
         Hashable
-            ``("nornax.LeapfrogKDK", 1)``.
+            ``("nornax.LeapfrogKDK", 2)`` (the summed drift, A3), or the key of
+            the scheme before A3, ``("nornax.LeapfrogKDK", 1)``, for
+            ``drift_order="legacy"`` (its arithmetic: a restart file written before
+            A3 continues bitwise under it).
         """
-        return ("nornax.LeapfrogKDK", 1)
+        return ("nornax.LeapfrogKDK", 1 if self.drift_order == "legacy" else 2)
 
     def open_step(self, state: Any, acceleration: Any, dt: Any) -> Any:
         """Drift (with the opening half-kick folded in) to the force's positions.
@@ -81,7 +96,9 @@ class LeapfrogKDK:
             ``[N, 2, 3]``: the new positions and the starting velocities.
         """
         return state.at[:, 0].set(
-            drift_positions(state[:, 0], state[:, 1], acceleration, dt)
+            drift_positions(
+                state[:, 0], state[:, 1], acceleration, dt, self.drift_order
+            )
         )
 
     def close_step(

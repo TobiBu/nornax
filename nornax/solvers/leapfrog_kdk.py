@@ -286,7 +286,13 @@ def initialize_block_state(
     )
 
 
-def drift_positions(positions: Vec3, velocities: Vec3, acc: Vec3, dt: Any) -> Vec3:
+#: the drift's evaluation orders (jaccpot's ``DRIFT_ORDERS``, multi-node plan A3)
+DRIFT_ORDERS = ("summed", "legacy")
+
+
+def drift_positions(
+    positions: Vec3, velocities: Vec3, acc: Vec3, dt: Any, order: str = "summed"
+) -> Vec3:
     """The KDK step's positions: the opening half-kick and the full drift.
 
     ``x + v dt + 0.5 a dt**2``, the velocity-Verlet form of ``K(dt/2) D(dt)``:
@@ -294,6 +300,15 @@ def drift_positions(positions: Vec3, velocities: Vec3, acc: Vec3, dt: Any) -> Ve
     :func:`leapfrog_kdk_step`). The one place nornax writes it; the rollouts and
     :class:`nornax.schemes.LeapfrogKDK` (the scheme jaccpot's production runner
     takes) all call it, so moving a loop between them moves no bits.
+
+    ``order="summed"`` (the default since multi-node plan A3, as jaccpot's
+    ``drift_positions``) sums the increment first, ``x + dt (v + 0.5 dt a)``:
+    one rounding of ``x`` per step. Left to right (``"legacy"``, the expression
+    before A3), ``0.5 a dt**2`` -- in a float32 state below ``x``'s last bit for
+    most particles at ``dt`` 5e-4 -- is rounded against ``x`` on its own, with the
+    same sign along an orbit (jaccpot ``docs/production_2026-11.md``, A3: 7x the
+    energy drift and 24x the angular-momentum drift of a float64 state on a
+    merger; summed, the float64 state's).
 
     Parameters
     ----------
@@ -305,13 +320,27 @@ def drift_positions(positions: Vec3, velocities: Vec3, acc: Vec3, dt: Any) -> Ve
         The total acceleration at the step's start.
     dt : Any
         The step.
+    order : str
+        :data:`DRIFT_ORDERS`; static.
 
     Returns
     -------
     Vec3
         The positions the step's force is evaluated at.
+
+    Raises
+    ------
+    ValueError
+        For an unknown ``order``.
     """
-    return positions + velocities * dt + 0.5 * acc * dt**2
+    if order == "summed":
+        # every addition has ONE product operand, so a backend that contracts a
+        # multiply-add into an FMA forms the same FMAs in every program (jaccpot's
+        # ``drift_positions``, the same expression)
+        return positions + dt * (velocities + (0.5 * dt) * acc)
+    if order == "legacy":
+        return positions + velocities * dt + 0.5 * acc * dt**2
+    raise ValueError(f"order must be one of {DRIFT_ORDERS}, got {order!r}")
 
 
 def kick_velocities(velocities: Vec3, acc: Vec3, acc_new: Vec3, dt: Any) -> Vec3:
