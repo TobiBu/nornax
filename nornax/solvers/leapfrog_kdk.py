@@ -286,7 +286,13 @@ def initialize_block_state(
     )
 
 
-def drift_positions(positions: Vec3, velocities: Vec3, acc: Vec3, dt: Any) -> Vec3:
+#: the drift's evaluation orders (jaccpot's ``DRIFT_ORDERS``, multi-node plan A3)
+DRIFT_ORDERS = ("summed", "legacy")
+
+
+def drift_positions(
+    positions: Vec3, velocities: Vec3, acc: Vec3, dt: Any, order: str = "summed"
+) -> Vec3:
     """The KDK step's positions: the opening half-kick and the full drift.
 
     ``x + v dt + 0.5 a dt**2``, the velocity-Verlet form of ``K(dt/2) D(dt)``:
@@ -294,6 +300,15 @@ def drift_positions(positions: Vec3, velocities: Vec3, acc: Vec3, dt: Any) -> Ve
     :func:`leapfrog_kdk_step`). The one place nornax writes it; the rollouts and
     :class:`nornax.schemes.LeapfrogKDK` (the scheme jaccpot's production runner
     takes) all call it, so moving a loop between them moves no bits.
+
+    ``order="summed"`` (the default since multi-node plan A3, as jaccpot's
+    ``drift_positions``) sums the increment first, ``x + dt (v + 0.5 dt a)``:
+    one rounding of ``x`` per step. Left to right (``"legacy"``, the expression
+    before A3), ``0.5 a dt**2`` -- in a float32 state below ``x``'s last bit for
+    most particles at ``dt`` 5e-4 -- is rounded against ``x`` on its own, with the
+    same sign along an orbit (jaccpot ``docs/production_2026-11.md``, A3: 7x the
+    energy drift and 24x the angular-momentum drift of a float64 state on a
+    merger; summed, the float64 state's).
 
     Parameters
     ----------
@@ -305,16 +320,56 @@ def drift_positions(positions: Vec3, velocities: Vec3, acc: Vec3, dt: Any) -> Ve
         The total acceleration at the step's start.
     dt : Any
         The step.
+    order : str
+        :data:`DRIFT_ORDERS`; static.
 
     Returns
     -------
     Vec3
         The positions the step's force is evaluated at.
+
+    Raises
+    ------
+    ValueError
+        For an unknown ``order``.
     """
-    return positions + velocities * dt + 0.5 * acc * dt**2
+    if order == "summed":
+        # jaccpot's ``drift_positions``, operand for operand, in a kernel of its own
+        return _isolated(
+            lambda x, v, a: x + dt * (v + (0.5 * dt) * a), positions, velocities, acc
+        )
+    if order == "legacy":
+        return positions + velocities * dt + 0.5 * acc * dt**2
+    raise ValueError(f"order must be one of {DRIFT_ORDERS}, got {order!r}")
 
 
-def kick_velocities(velocities: Vec3, acc: Vec3, acc_new: Vec3, dt: Any) -> Vec3:
+def _isolated(fn: Any, *operands: Any) -> Any:
+    """``fn(*operands)`` as a kernel of its own (jaccpot's ``fmm_state._isolated``).
+
+    A backend that contracts a multiply-add into an FMA decides per kernel, so the
+    same expression fused with different neighbours rounds differently from one
+    program to another; an ``optimization_barrier`` on the operands and the result
+    keeps it alone, the same kernel in every program (the rollouts here, jaccpot's
+    runner, a mesh shard).
+
+    Parameters
+    ----------
+    fn : Any
+        Elementwise, on ``operands``.
+    *operands : Any
+        Its array inputs.
+
+    Returns
+    -------
+    Any
+        ``fn(*operands)``.
+    """
+    return jax.lax.optimization_barrier(fn(*jax.lax.optimization_barrier(operands)))
+
+
+def kick_velocities(
+    velocities: Vec3, acc: Vec3, acc_new: Vec3, dt: Any, order: str = "summed"
+) -> Vec3:
     """The KDK step's velocities: both half-kicks, folded.
 
     ``v + 0.5 (a + a') dt`` with ``a`` the acceleration at the step's start and
@@ -331,13 +386,29 @@ def kick_velocities(velocities: Vec3, acc: Vec3, acc_new: Vec3, dt: Any) -> Vec3
         The total acceleration at its end positions.
     dt : Any
         The step.
+    order : str
+        :data:`DRIFT_ORDERS` (static): ``"summed"`` (the default since A3) runs the
+        kick in a kernel of its own (:func:`_isolated`), as jaccpot's
+        ``kick_velocities``; ``"legacy"`` is the expression before A3, fused where
+        XLA puts it.
 
     Returns
     -------
     Vec3
         The velocities at the step's end.
+
+    Raises
+    ------
+    ValueError
+        For an unknown ``order``.
     """
-    return velocities + 0.5 * (acc + acc_new) * dt
+    if order == "summed":
+        return _isolated(
+            lambda v, a, a_new: v + 0.5 * (a + a_new) * dt, velocities, acc, acc_new
+        )
+    if order == "legacy":
+        return velocities + 0.5 * (acc + acc_new) * dt
+    raise ValueError(f"order must be one of {DRIFT_ORDERS}, got {order!r}")
 
 
 def _drift(state: BlockStepState, dt: Any) -> Vec3:

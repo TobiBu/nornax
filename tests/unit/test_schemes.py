@@ -13,6 +13,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from nornax import LeapfrogKDK
 from nornax.forces.mutual_direct import MutualDirectSumGravity
@@ -116,3 +117,26 @@ def test_the_scheme_is_static_and_rowwise() -> None:
     assert np.array_equal(
         scheme.open_step(state, a, DT)[perm], scheme.open_step(state[perm], a[perm], DT)
     )
+
+
+def test_the_drift_orders() -> None:
+    """A3: the drift sums its increment first (``x + dt (v + 0.5 dt a)``, one
+    product per addition), the default; ``"legacy"`` is the expression before A3,
+    left to right. The scheme carries the order in its key: legacy keeps the key of
+    the scheme before A3, so a restart file written then continues under it."""
+    x, v, _ = _system(16)
+    a = 0.3 * x
+    summed = drift_positions(x, v, a, DT)
+    legacy = drift_positions(x, v, a, DT, "legacy")
+    assert np.array_equal(summed, x + DT * (v + (0.5 * DT) * a))
+    assert np.array_equal(legacy, x + v * DT + 0.5 * a * DT**2)
+    state = jnp.stack([x, v], axis=1)
+    for order, want in (("summed", summed), ("legacy", legacy)):
+        scheme = LeapfrogKDK(drift_order=order)
+        assert np.array_equal(scheme.open_step(state, a, DT)[:, 0], want)
+    assert LeapfrogKDK().key() == ("nornax.LeapfrogKDK", 2)
+    assert LeapfrogKDK(drift_order="legacy").key() == ("nornax.LeapfrogKDK", 1)
+    with pytest.raises(ValueError, match="drift_order"):
+        LeapfrogKDK(drift_order="kahan")
+    with pytest.raises(ValueError, match="order"):
+        drift_positions(x, v, a, DT, "kahan")
