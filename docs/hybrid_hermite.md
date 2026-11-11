@@ -207,6 +207,11 @@ Properties of the scheme:
 - **Near field.** The engine's softened kernel over the near leaves.
 - **Shapes.** Static capacities (`TargetPlan`), so moving points recompile
   nothing, and an overflow is reported (`ok`, `needs`).
+- **Memory.** The capacities are TOTAL pair counts in flat (group, node) lists. The
+  walk runs in budgeted blocks and the evaluation in chunks of 128 pairs, so the
+  compiled temporaries at N = 1e6 are 0.1-0.45 GiB for M = 1e3-1e5.
+  The first version gave every group the worst group's capacity: its GPU gate
+  OOMed at 14.9 GiB with 1e6 galaxy points on the cluster's tree.
 
 Accuracy against an fp64 direct sum (4000 sources, 700 points: inside, clump,
 far outside, on top of sources):
@@ -250,9 +255,14 @@ all-direct-sum Hermite-4 run of the whole system (dt = 5e-4), the max position
 error is 2.1e-4, 5.1e-5 and 1.3e-5 at dt = 0.04, 0.02 and 0.01, again 4x per
 halving.
 
-The jaccpot-coupled run and the GPU functional run (galaxy 10^6 + cluster 10^4
-on one A100) are recorded in jaccpot's `docs/production_2026-11.md` (## HH) and
-in the session report.
+**GPU functional gate (PASS).** Contended A100, `on-free-card`, so no timing claims:
+
+- galaxy 10^6 (galaxy preset, `dehnen_error`, leaf 64, p6) + Plummer cluster 10^4 (Hermite-4, n_sub 16),
+  `cross="fmm"`;
+- 100 slow steps: both verdicts hold, |dE/E| <= 9.0e-9, |dP| <= 1.3e-10;
+- device peak 7.37 GB.
+
+The record is in jaccpot's `docs/production_2026-11.md` (## HH).
 
 ## 6. Session 2+ plan (not built)
 
