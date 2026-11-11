@@ -28,6 +28,12 @@ from .forces import (  # noqa: E402
     MutualForceModel,
     RebuildingForceModel,
 )
+from .hybrid import (  # noqa: E402
+    DirectSlowForce,
+    HybridHermite,
+    HybridState,
+    hybrid_rollout,
+)
 from .initial_conditions import (  # noqa: E402
     sample_hernquist_sphere,
     sample_plummer_sphere,
@@ -76,12 +82,15 @@ __all__ = [
     "AdaptiveStepPolicy",
     "BlockStepState",
     "CompositePotential",
+    "DirectSlowForce",
     "ConformanceError",
     "ConformanceReport",
     "ForceDerivatives",
     "FusedMutualForceModel",
     "Hernquist",
     "HernquistParams",
+    "HybridHermite",
+    "HybridState",
     "JaccpotForceModel",
     "JaccpotOptions",
     "LeapfrogKDK",
@@ -103,6 +112,7 @@ __all__ = [
     "check_sharded_force_model",
     "gather_by_id",
     "gravitational_potential_energy",
+    "hybrid_rollout",
     "initialize_block_state",
     "initialize_state",
     "leapfrog_kdk_rollout",
