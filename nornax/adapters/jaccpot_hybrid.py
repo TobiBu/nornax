@@ -278,8 +278,8 @@ class FusedHybridForce:
         if xc is None:
             acc, aux_g = self.galaxy.step(xg, mg, self.params, aux=aux_g)
             return jnp.asarray(acc, xg.dtype), None, (aux_g, fb_c, ok, needs)
-        G, kernel, eps = self._engine_kernel()
         if self.cross == "direct":
+            G, kernel, eps = self._engine_kernel()
             acc, aux_g = self.galaxy.step(xg, mg, self.params, aux=aux_g)
             a_c, _ = _direct_field(xc, xg, mg, G=G, kernel=kernel, eps=eps)
             a_back, _ = _direct_field(xg, xc, mc, G=G, kernel=kernel, eps=eps)

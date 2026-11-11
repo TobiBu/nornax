@@ -220,3 +220,88 @@ def test_bad_configurations_are_refused():
         HybridHermite(order=5)
     with pytest.raises(ValueError, match="drift_order"):
         HybridHermite(drift_order="nope")
+
+
+# ---------------------------------------------------------------------------
+# FusedHybridForce's orchestration on a stub provider (no jaccpot needed): which
+# calls it makes, how the slow accelerations are summed and the aux threaded.
+# ---------------------------------------------------------------------------
+
+
+class _Field:
+    def __init__(self, acc, ok=True, needs=(3, 2), force_scale=None):
+        self.acc = acc
+        self.ok = jnp.asarray(ok)
+        self.needs = jnp.asarray(needs, jnp.int32)
+        self.force_scale = force_scale
+
+
+class _StubProvider:
+    """Galaxy self-force ``-x``, field at targets ``-0.5 x``."""
+
+    def __init__(self, target_ok=True):
+        self.calls = []
+        self.target_ok = target_ok
+
+    def step(self, x, m, params=None, aux=None):
+        self.calls.append("step")
+        return -x, (None, None, None)
+
+    def step_with_targets(self, x, m, pts, plan, params=None, aux=None, **kw):
+        self.calls.append("step_with_targets")
+        return -x, (None, None, None), _Field(-0.5 * pts, ok=self.target_ok)
+
+    def rebuild(self, x, m, force_scale=None):
+        self.calls.append("rebuild")
+        return x
+
+    def target_field(self, topo, pts, plan):
+        self.calls.append("target_field")
+        return _Field(jnp.full_like(pts, 0.25), needs=(1, 5))
+
+    def capacity_ok(self, topo):
+        return jnp.asarray(True)
+
+
+def test_fused_hybrid_force_orchestration_on_a_stub():
+    from nornax.adapters.jaccpot_hybrid import FusedHybridForce
+
+    xg, vg, mg, xc, vc, mc = _system()
+    galaxy, cluster = _StubProvider(), _StubProvider(target_ok=False)
+    force = FusedHybridForce(
+        galaxy=galaxy, cluster_plan="pc", cross="fmm", cluster=cluster, galaxy_plan="pg"
+    )
+    a_g, a_c, aux = force.slow_accelerations(xg, mg, None, None)
+    assert a_c is None and galaxy.calls == ["step"]
+    np.testing.assert_array_equal(np.asarray(a_g), -np.asarray(xg))
+    a_g, a_c, aux = force.slow_accelerations(xg, mg, xc, mc, aux=aux)
+    assert galaxy.calls[1:] == ["step_with_targets"]
+    assert cluster.calls == ["rebuild", "target_field"]
+    np.testing.assert_allclose(np.asarray(a_g), -np.asarray(xg) + 0.25)
+    np.testing.assert_allclose(np.asarray(a_c), -0.5 * np.asarray(xc))
+    aux_g, fb_c, ok, needs = aux
+    assert aux_g == (None, None, None) and fb_c is None
+    assert bool(ok) and np.asarray(needs).tolist() == [3, 5]
+    # the verdict is AND-ed over evaluations
+    _, _, aux2 = force.slow_accelerations(
+        xg, mg, xc, mc, aux=(aux_g, fb_c, jnp.asarray(False), needs)
+    )
+    assert not bool(aux2[2])
+    # a rollout over the stub runs the scheme's calls
+    scheme = _scheme()
+    state = scheme.initial_state(force, galaxy=(xg, vg, mg), cluster=(xc, vc, mc))
+    _, rec = hybrid_rollout(
+        state, 0.01, scheme, force, n_steps=2, record_fn=lambda s: s.time
+    )
+    np.testing.assert_allclose(np.asarray(rec), [0.01, 0.02])
+    with pytest.raises(ValueError, match="without a galaxy"):
+        force.slow_accelerations(None, None, xc, mc)
+
+
+def test_fused_hybrid_force_refuses_bad_configurations():
+    from nornax.adapters.jaccpot_hybrid import FusedHybridForce
+
+    with pytest.raises(ValueError, match="cross"):
+        FusedHybridForce(galaxy=_StubProvider(), cross="nope")
+    with pytest.raises(ValueError, match="galaxy_plan"):
+        FusedHybridForce(galaxy=_StubProvider(), cluster=_StubProvider())
