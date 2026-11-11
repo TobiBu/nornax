@@ -260,7 +260,7 @@ class _StubProvider:
         self.calls.append("rebuild")
         return x
 
-    def target_field(self, topo, pts, plan):
+    def target_field(self, topo, pts, plan, softening=None):
         self.calls.append("target_field")
         return _Field(jnp.full_like(pts, 0.25), needs=(1, 5))
 

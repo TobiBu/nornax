@@ -105,6 +105,12 @@ class FusedHybridForce:
         (``cross="fmm"``).
     params : Any
         The galaxy force's parameters (``None``: the engine's own).
+    back_softening : float | None
+        The back-reaction's pair softening (:meth:`prepare` sets the galaxy's),
+        passed to the cluster provider's ``target_field``: the cluster's tree can
+        then be built with a small softening, so its own walk stays O(M log M)
+        (with the galaxy's, every pair of a compact cluster is near: at 1e5 stars
+        its prepare overflowed the walk's 2.7e8 queue).
     split_kind : ClassVar[str]
         The split it implements: ``"membership"`` (the cluster's stars out of the
         galaxy's tree).
@@ -116,6 +122,7 @@ class FusedHybridForce:
     cluster: Any = None
     galaxy_plan: Any = None
     params: Any = None
+    back_softening: float | None = None
     split_kind: ClassVar[str] = "membership"
 
     def __post_init__(self) -> None:
@@ -155,8 +162,9 @@ class FusedHybridForce:
             are the cross pairs').
         cluster_solver : Any
             A solver for the cluster's stars as sources (``cross="fmm"``): the
-            galaxy's softening and kernel, a geometric criterion. ``None`` with
-            ``cross="direct"``.
+            galaxy's kernel, a geometric criterion and a SMALL softening (its
+            own walk; the back-reaction takes the galaxy's softening through
+            :attr:`back_softening`). ``None`` with ``cross="direct"``.
         xg : Any
             Galaxy start positions.
         mg : Any
@@ -222,7 +230,11 @@ class FusedHybridForce:
                     "rebuild carries no force scale here)"
                 )
             plan_g = clu.plan_targets(
-                ctopo, jnp.asarray(xg), group_size=group_size, headroom=headroom
+                ctopo,
+                jnp.asarray(xg),
+                group_size=group_size,
+                headroom=headroom,
+                softening=float(gal.engine.softening),
             )
             del ctopo
         gal.engine.clear_prepared_state_cache()
@@ -232,6 +244,7 @@ class FusedHybridForce:
             cross=cross,
             cluster=clu,
             galaxy_plan=plan_g,
+            back_softening=float(gal.engine.softening) if clu is not None else None,
         )
         seed_g = None if f_b_g is None else (f_b_g, None, None)
         return force, (seed_g, f_b_c, jnp.asarray(True), jnp.zeros((2,), jnp.int32))
@@ -304,7 +317,9 @@ class FusedHybridForce:
         ctopo = self.cluster.rebuild(
             jnp.asarray(xc, xg.dtype), jnp.asarray(mc, xg.dtype)
         )
-        back = self.cluster.target_field(ctopo, xg, self.galaxy_plan)
+        back = self.cluster.target_field(
+            ctopo, xg, self.galaxy_plan, softening=self.back_softening
+        )
         ok = ok & back.ok & self.cluster.capacity_ok(ctopo)
         needs = jnp.maximum(needs, back.needs)
         a_g = jnp.asarray(acc, xg.dtype) + jnp.asarray(back.acc, xg.dtype)
