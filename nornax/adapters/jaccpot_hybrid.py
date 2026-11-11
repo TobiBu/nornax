@@ -82,6 +82,48 @@ def _direct_field(
     return acc, pot
 
 
+def _pair_energy(x: Any, m: Any, *, G: float, eps: float, block: int = 1024) -> Any:
+    """``sum_{i<j} -G m_i m_j / sqrt(r_ij^2 + eps^2)``, in row blocks (O(block N) memory).
+
+    Parameters
+    ----------
+    x : Any
+        ``[M, 3]`` positions.
+    m : Any
+        ``[M]`` masses.
+    G : float
+        Gravitational constant.
+    eps : float
+        Plummer softening.
+    block : int
+        Rows per block.
+
+    Returns
+    -------
+    Any
+        The pair energy (a scalar in ``x``'s dtype).
+    """
+    x = jnp.asarray(x)
+    m = jnp.asarray(m, x.dtype)
+    n = int(x.shape[0])
+    b = max(1, min(int(block), n))
+    nb = -(-n // b)
+    pad = nb * b - n
+    xp = jnp.concatenate([x, jnp.zeros((pad, 3), x.dtype)]) if pad else x
+    mp = jnp.concatenate([m, jnp.zeros((pad,), x.dtype)]) if pad else m
+    rows = jnp.arange(nb * b).reshape(nb, b)
+    cols = jnp.arange(n)
+
+    def one(args: Any) -> Any:
+        idx, xb, mb = args
+        r2 = jnp.sum((xb[:, None, :] - x[None, :, :]) ** 2, axis=-1) + eps * eps
+        inv = jnp.where(idx[:, None] != cols[None, :], jax.lax.rsqrt(r2), 0.0)
+        return jnp.sum(mb * jnp.sum(m[None, :] * inv, axis=1))
+
+    parts = jax.lax.map(one, (rows, xp.reshape(nb, b, 3), mp.reshape(nb, b)))
+    return -0.5 * jnp.asarray(G, x.dtype) * jnp.sum(parts)
+
+
 @dataclass(frozen=True)
 class FusedHybridForce:
     """The galaxy's FMM + the coupling to one direct-sum cluster (a ``SlowForce``).
@@ -358,8 +400,6 @@ class FusedHybridForce:
         dict
             ``K_g, K_c, W_gg, W_gc, W_cc, E, P (3,), L (3,)``.
         """
-        from nornax.diagnostics import gravitational_potential_energy
-
         G, kernel, eps = self._engine_kernel()
         xg, vg, mg = (
             state.galaxy_positions,
@@ -419,12 +459,11 @@ class FusedHybridForce:
                 )
             out["W_gc"] = float(np.sum(mc * np.asarray(pot_c, f64)))
             out["W_cc"] = float(
-                gravitational_potential_energy(
-                    jnp.asarray(xc, jnp.float64),
-                    jnp.asarray(mc),
-                    G=G,
-                    softening=float(internal_softening),
-                )
+                jax.jit(
+                    lambda xx, mm: _pair_energy(
+                        xx, mm, G=G, eps=float(internal_softening)
+                    )
+                )(jnp.asarray(xc, jnp.float64), jnp.asarray(mc))
             )
             P = P + np.sum(mc[:, None] * vc, 0)
             L = L + np.sum(np.cross(np.asarray(xc, f64), mc[:, None] * vc), 0)
