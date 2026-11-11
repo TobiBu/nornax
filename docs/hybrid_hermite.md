@@ -260,7 +260,18 @@ halving.
 - galaxy 10^6 (galaxy preset, `dehnen_error`, leaf 64, p6) + Plummer cluster 10^4 (Hermite-4, n_sub 16),
   `cross="fmm"`;
 - 100 slow steps: both verdicts hold, |dE/E| <= 9.0e-9, |dP| <= 1.3e-10;
-- device peak 7.37 GB.
+- device peak 1.01 GiB with the final code. The cluster provider has its own small softening, and the back-reaction
+  takes the galaxy's through `target_field(softening=)`; with the galaxy's softening on the cluster's tree it was
+  7.37 GB, and at 1e5 stars that walk overflowed.
+
+**Probe at 10^7 + 10^5** (8 steps): verdicts ok, |dE/E| <= 9.2e-9, |dP| <= 2e-11, device peak 5.34 GiB.
+
+**Production shape, estimated** (jaccpot `production_2026-11.md`, ## HH):
+
+- 10^8 galaxy + 10^5-10^6 stars fits on one A100 for galaxy -> stars.
+- The FMM back-reaction over all 10^8 galaxy points adds ~10 GB and needs slicing or a multipole for distant
+  galaxy particles (session 2).
+- The dense target walk's O(groups x nodes) work binds before memory does (a frontier walk, session 2).
 
 The record is in jaccpot's `docs/production_2026-11.md` (## HH).
 
@@ -304,7 +315,10 @@ The record is in jaccpot's `docs/production_2026-11.md` (## HH).
    the back-reaction against the galaxy step, and the internal direct sum at
    M = 10^4–10^5 (a Pallas direct-sum Hermite kernel if it binds). These are
    sbatch files under jaccpot `bench/slurm/hh/`.
-8. **`target_points` performance.** The dense group × node walk costs
+8. **The back-reaction at 10^8.** Evaluate the cluster's field over galaxy-point slices, or use its multipole
+   beyond a few cluster radii and `target_points` only inside. Over all 10^8 points the per-point transients are
+   ~10 GB.
+9. **`target_points` performance.** The dense group × node walk costs
    O(groups × nodes). At 10^8 galaxy particles × 10^5 stars, replace it with a
    frontier walk (yggdrax), and replace M2P per point with M2L to compact groups
    plus a group radius in the criterion (two-sided error control).
