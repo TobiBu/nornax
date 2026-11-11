@@ -13,6 +13,13 @@ and the galaxy-cluster coupling. One slow step of length ``dt`` is Strang's
   internal dynamics -- its self-gravity alone, by direct summation -- with
   ``n_sub`` Hermite-4 (or 6) steps of ``dt / n_sub``.
 
+The galaxy's (tidal) field on the cluster is FROZEN through the Hermite substeps of
+a galaxy step: it is evaluated once per slow step (at the step's end, which is the
+next step's start) and enters as the two half-kicks, never inside a substep. Which
+interactions are short-range is one seam, :class:`ShortRangeSplit`: today
+:class:`MembershipSplit` (the cluster's internal pairs), later a changeover kernel
+(user direction 2026-11-11; ``docs/hybrid_hermite.md``).
+
 This is the P3T/PeTar pattern with a hard (membership) split instead of a
 changeover kernel; ``docs/hybrid_hermite.md`` weighs the two and records the
 measurements behind the choice. The galaxy half is written in the velocity-Verlet
@@ -47,7 +54,7 @@ fixed-step Hermite run's; ``coupled=False`` -- both at once, in one program.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple, Protocol, runtime_checkable
+from typing import Any, ClassVar, NamedTuple, Protocol, runtime_checkable
 
 import jax
 import jax.numpy as jnp
@@ -63,11 +70,93 @@ __all__ = [
     "DirectSlowForce",
     "HybridHermite",
     "HybridState",
+    "MembershipSplit",
+    "ShortRangeSplit",
     "SlowForce",
     "hybrid_rollout",
 ]
 
 _DERIV_ORDER = {4: 2, 6: 4}
+
+
+@runtime_checkable
+class ShortRangeSplit(Protocol):
+    """Which interactions are SHORT-range (the fast Hermite flow) and which long-range.
+
+    The one seam between the scheme and how it splits the force, so that a
+    changeover kernel (P3T / PeTar: every pair split smoothly by its separation)
+    can replace today's membership split without redesigning the scheme. A pair's
+    force is ``F = K F + (1 - K) F``: the fast flow integrates ``K F``, the slow
+    kicks carry ``(1 - K) F``.
+
+    Attributes
+    ----------
+    kind : str
+        ``"membership"`` (:class:`MembershipSplit`) or, later, ``"changeover"``.
+        A slow force declares the kind it implements (its ``split_kind``), and
+        :class:`HybridHermite` refuses a mismatch.
+    """
+
+    kind: str
+
+    def fast_force(self) -> ForceModel:
+        """The short-range force (``K F`` summed) the fast flow integrates."""
+        ...
+
+    def pair_weight(self, r2: Any, both_members: Any) -> Any:
+        """``K`` per pair, in ``[0, 1]``: the fast share of the pair's force."""
+        ...
+
+
+@dataclass(frozen=True)
+class MembershipSplit:
+    """The hard split by membership (session 1): ``K = 1`` iff both ends are in the set.
+
+    Every pair between two stars of the cluster set is short-range, with its whole
+    force; every other pair (galaxy-galaxy, galaxy-cluster) is long-range. The
+    cluster's self-gravity is thus in the fast flow only (``internal``) and in no
+    slow force.
+
+    Attributes
+    ----------
+    internal : ForceModel
+        The cluster's internal force (default: Newtonian direct sum, ``G = 1``,
+        no softening); its ``derivatives`` must reach the Hermite order's needs
+        (jerk for 4, crackle for 6).
+    kind : ClassVar[str]
+        ``"membership"``.
+    """
+
+    internal: ForceModel = field(default_factory=DirectSumGravity)
+    kind: ClassVar[str] = "membership"
+
+    def fast_force(self) -> ForceModel:
+        """The cluster's internal force.
+
+        Returns
+        -------
+        ForceModel
+            :attr:`internal`.
+        """
+        return self.internal
+
+    def pair_weight(self, r2: Any, both_members: Any) -> Any:
+        """``K``: 1 where both ends are members, else 0 (whatever the separation).
+
+        Parameters
+        ----------
+        r2 : Any
+            Squared pair separations (unused by this split; a changeover reads them).
+        both_members : Any
+            Boolean, broadcastable to ``r2``.
+
+        Returns
+        -------
+        Any
+            ``K`` in ``r2``'s dtype.
+        """
+        r2 = jnp.asarray(r2)
+        return jnp.where(jnp.asarray(both_members), 1.0, 0.0).astype(r2.dtype)
 
 
 class HybridState(NamedTuple):
@@ -153,10 +242,13 @@ class DirectSlowForce:
         Gravitational constant.
     softening : float
         Plummer softening of every slow pair (galaxy-galaxy and galaxy-cluster).
+    split_kind : ClassVar[str]
+        The split it implements: ``"membership"``.
     """
 
     G: float = 1.0
     softening: float = 0.0
+    split_kind: ClassVar[str] = "membership"
 
     def slow_accelerations(
         self, xg: Any, mg: Any, xc: Any, mc: Any, *, aux: Any = None
@@ -216,10 +308,10 @@ class HybridHermite:
         ``dt / n_sub``). Static.
     order : int
         Hermite order, 4 or 6. Static.
-    internal : ForceModel
-        The cluster's internal force (default: Newtonian direct sum, ``G = 1``,
-        no softening); its ``derivatives`` must reach the order's needs (jerk for
-        4, snap for 6).
+    split : Any
+        A :class:`ShortRangeSplit`: which interactions are short-range (default :class:`MembershipSplit`: the
+        cluster's internal pairs, Newtonian, ``G = 1``); its ``fast_force()`` is
+        the force the Hermite flow integrates.
     coupled : bool
         ``False``: the zero-coupling limit -- the galaxy feels only itself, the
         cluster only itself (``slow`` is asked for the galaxy alone).
@@ -230,7 +322,7 @@ class HybridHermite:
 
     n_sub: int = 8
     order: int = 4
-    internal: ForceModel = field(default_factory=DirectSumGravity)
+    split: Any = field(default_factory=MembershipSplit)
     coupled: bool = True
     drift_order: str = "summed"
 
@@ -243,9 +335,32 @@ class HybridHermite:
             raise ValueError(
                 f"drift_order must be one of {DRIFT_ORDERS}, got {self.drift_order!r}"
             )
+        if not isinstance(self.split, ShortRangeSplit):
+            raise TypeError(
+                "split must implement ShortRangeSplit (kind, fast_force, pair_weight)"
+            )
+        if self.split.kind != "membership":
+            raise NotImplementedError(
+                f"split kind {self.split.kind!r}: only 'membership' is implemented "
+                "(a changeover split is planned, docs/hybrid_hermite.md)"
+            )
+
+    @property
+    def internal(self) -> ForceModel:
+        """The short-range force the fast flow integrates (``split.fast_force()``)."""
+        return self.split.fast_force()
+
+    def _check_slow(self, slow: Any) -> None:
+        kind = getattr(slow, "split_kind", None)
+        if kind is not None and kind != self.split.kind:
+            raise ValueError(
+                f"the slow force implements a {kind!r} split, the scheme a "
+                f"{self.split.kind!r} one"
+            )
 
     # ------------------------------------------------------------------
     def _slow(self, slow: SlowForce, xg: Any, mg: Any, xc: Any, mc: Any, aux: Any):
+        self._check_slow(slow)
         if not self.coupled:
             if xg is None:
                 return None, None, aux

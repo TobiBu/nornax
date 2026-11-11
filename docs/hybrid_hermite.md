@@ -12,6 +12,27 @@ Session 1 (2026-11-11) covers one cluster, the force split, the time integration
 jaccpot `target_points`, and the gates below. Session 2+ is planned at the end of
 this note.
 
+## 0. User direction (2026-11-11, relayed by the lead; binding for session 1, not a final design lock)
+
+1. **First implementation:**
+   - option B with a hard split: the cluster's stars are out of the galaxy tree, the galaxy's field reaches them
+     through `target_points`, and the back-reaction comes from the cluster as a source term;
+   - the tidal field is **frozen** during the Hermite substeps inside a galaxy step;
+   - A vs B is measured and reported, and B is built even if A wins. Here A does not win (section 1).
+2. **One interface for the split:** today "which stars are in a cluster set" (membership), later "which pairs are
+   short-range" (a P3T/PeTar changeover), so a changeover replaces the split without redesigning the scheme. That
+   interface is `ShortRangeSplit` (section 2).
+3. **A feasibility note** on close encounters between FIELD stars, no build: section 7.
+
+How the build follows it:
+
+- **The frozen tidal field.** The galaxy's field on the cluster is evaluated once per galaxy step, at the step's end,
+  which is the next step's start. It enters as the two half-kicks of Strang's `K(dt/2) D(dt) K(dt/2)`, and no substep
+  re-evaluates it.
+- **Why kicks rather than a constant acceleration.** Adding the step-start field as a constant acceleration inside
+  every substep would also freeze it, but it is first order unless symmetrised. The kicks are the second-order,
+  time-symmetric form of the same freezing: the measured order is 2.0.
+
 ## 1. The force split: where the cluster's self-gravity lives
 
 Three forces act on the system: galaxy on galaxy (G→G), galaxy on cluster (G→C),
@@ -107,6 +128,28 @@ heavy and collisionless. A changeover between a star and a galaxy particle would
 make that pair collisional, which is exactly what must not happen. A changeover
 inside the cluster would make the FMM evaluate a new kernel (1 − K) for cluster
 pairs, which jaccpot's lane does not have.
+
+**The seam: `ShortRangeSplit`.** The scheme reads the split through one interface:
+
+- `kind`;
+- `fast_force()`, the short-range force the Hermite flow integrates;
+- `pair_weight(r2, both_members) -> K in [0, 1]`, the fast share of a pair's force: `F = K F + (1 - K) F`, with the
+  fast flow taking `K F` and the slow kicks `(1 - K) F`.
+
+`MembershipSplit` (session 1) has `K = 1` iff both ends are in the cluster set. A changeover split will have
+`K(r_ij)` smooth between `r_in` and `r_out`, for every pair or for a pair class (star-star, not star-DM).
+
+Slow forces declare the split they implement (`split_kind`: `DirectSlowForce` and `FusedHybridForce` are
+`"membership"`), and `HybridHermite` refuses a mismatch. It also refuses any split kind but membership until the
+changeover exists.
+
+What a changeover needs beyond the scheme:
+
+- a slow force that applies `(1 - K)` to near pairs: in jaccpot, a factor in the near-field pair kernel, the same slot
+  a compact softening kernel uses;
+- a walk separation floor of at least `r_out`, so the far field stays exact, as the compact kernel's floor already
+  does;
+- neighbour lists for the fast flow (`K > 0` pairs).
 
 **Decision: a hard, membership-based split.** Its one discontinuity is the
 membership transfer when a star is stripped (session 2). At that moment the
@@ -255,3 +298,76 @@ in the session report.
    O(groups × nodes). At 10^8 galaxy particles × 10^5 stars, replace it with a
    frontier walk (yggdrax), and replace M2P per point with M2L to compact groups
    plus a group radius in the criterion (two-sided error control).
+
+## 7. Feasibility note: close encounters between FIELD stars (not built; user direction 3)
+
+**Question.** Should the hybrid split be extended from cluster members to every field star? That is, a changeover
+for all star-star pairs, so that close encounters in the galaxy's field are integrated by Hermite. It is tempting and
+unique for a galaxy code, and the fear is the slowdown.
+
+**When are field encounters physical?** Only when a particle is a star. With particle mass m, the two-body
+relaxation time is `t_relax ~ 0.34 sigma^3 / (G^2 m rho ln Lambda)`. Resolving encounters means dropping the
+softening, which raises `ln Lambda` from `ln(b_max / eps)` to `ln(b_max / b_90)`, with `b_90 = 2 G m / v^2`.
+
+At m = 1e3 Msun (a Milky Way of 1e8 particles; solar neighbourhood: sigma 50 km/s, rho 0.06 Msun/pc^3,
+b_max 1 kpc):
+
+| quantity | value |
+|---|---|
+| t_relax with eps = 10 pc (ln Lambda 4.6) | about 8 Gyr |
+| t_relax resolving encounters (b_90 = 3.4e-3 pc, ln Lambda 12.6) | about 3 Gyr |
+
+So resolving them makes the ARTIFICIAL relaxation 2.7x faster. Field encounters are physical only at star-by-star
+resolution (m ~ 1 Msun), where `t_relax` exceeds a Hubble time by orders of magnitude and only the rare close pairs
+and binaries matter. In practice that means:
+
+- a star-by-star dwarf galaxy (1e6-1e8 stars);
+- a star-by-star region (a nuclear star cluster, a stream) inside a coarser host, with the dark matter (and coarse
+  host particles) kept softened. That is a pair-class changeover: star-star only.
+
+**Cost model.** A pair must not cross the changeover shell within one slow step, so `r_out >~ v_rel dt_slow`. The
+expected neighbours inside `r_out` per particle are `(4 pi / 3) r_out^3 n`, and the shortest Hermite step needed is
+about `t(b_90) ~ sqrt(b_90^3 / (2 G m))`, compared with `dt_slow`
+(`hh/scripts`, `G = 4.50e-3 pc^3 Msun^-1 Myr^-2`):
+
+| case | m [Msun] | n [pc^-3] | v_rel, dt_slow | r_out | neighbours / particle | b_90 | dt_slow / t(b_90) |
+|---|---|---|---|---|---|---|---|
+| MW 1e8, disc | 1e3 | 6e-5 | 50 km/s, 0.5 Myr | 26 pc | 4.2 | 3.4e-3 pc | 7e3 |
+| MW 1e8, bulge centre | 1e3 | 0.1 | 150 km/s, 0.5 Myr | 77 pc | 1.9e5 | 3.8e-4 pc | 2e5 |
+| MW 1e9, disc | 1e2 | 6e-4 | 50 km/s, 0.1 Myr | 5 pc | 0.34 | 3.4e-4 pc | 1.5e4 |
+| star-by-star dwarf, centre | 1 | 0.1 | 10 km/s, 0.1 Myr | 1 pc | 0.45 | 8.6e-5 pc | 1.2e4 |
+| same, dt_slow 0.01 Myr | 1 | 0.1 | 10 km/s, 0.01 Myr | 0.1 pc | 4.5e-4 | 8.6e-5 pc | 1.2e3 |
+
+What the table says:
+
+- **The Milky Way is out of reach.** At galaxy resolutions the changeover shell holds several to 1e5 particles
+  (bulge). The fast set would be most of the galaxy, which is the slowdown feared, and the encounters are unphysical
+  anyway.
+- **A star-by-star dwarf is the feasible target.**
+  - With `dt_slow` ~ 0.01-0.1 Myr, fewer than 0.05-0.0005 % of the stars have a neighbour inside `r_out` at any step.
+    The fast set is tiny: neighbour pairs, not N^2.
+  - A close passage needs 1e3-1e4 substeps of its own. With individual (Aarseth / block) steps inside the fast flow,
+    only those few pairs take them. Hard binaries need regularisation (KS / AR, PeTar's SDAR) rather than ever
+    smaller Hermite steps.
+  - The FMM cost is set by `dt_slow`: ~1e4-1e5 FMM steps per Gyr at 1e7-1e8 stars.
+
+**What the FMM near field would need:**
+
+- a `(1 - K(r))` factor in the near-field pair kernel, a polynomial like PeTar's, next to the softening kernel's
+  factor in the same Pallas/jnp pair loop;
+- a walk separation floor of at least `r_out`, the mechanism the compact kernels already have;
+- a near-list export of the `K > 0` pairs, the fast set's neighbour lists. The flat walk's near list holds them at
+  leaf granularity and needs a particle-level filter.
+
+None of this changes the far field.
+
+**Tie to the block-step track B\*.** C1 measured no block-step payoff on the fused lane: the FMM must run on shared
+slow steps anyway. The changeover design does not need block steps in the FMM. Individual steps live only in the fast
+flow, a small direct-sum set (nornax `blockstep` + `AarsethController` on neighbour pairs), so the two tracks are
+independent. The slowdown is bounded by the fast set's work: `N_fast x neighbours x substeps` per slow step, plus
+shorter slow steps if `r_out` must stay small.
+
+**Recommendation.** Do not pursue field encounters for Milky Way runs. For a star-by-star dwarf, or a star-by-star
+region, they are feasible once the changeover split (section 2) and adaptive fast steps (section 6, item 3) exist.
+The first measurement would be the fast-set size and the substep distribution in a 1e6-star dwarf at dt_slow 0.1 and
+0.01 Myr.

@@ -32,6 +32,8 @@ from .hybrid import (  # noqa: E402
     DirectSlowForce,
     HybridHermite,
     HybridState,
+    MembershipSplit,
+    ShortRangeSplit,
     hybrid_rollout,
 )
 from .initial_conditions import (  # noqa: E402
@@ -91,6 +93,7 @@ __all__ = [
     "HernquistParams",
     "HybridHermite",
     "HybridState",
+    "MembershipSplit",
     "JaccpotForceModel",
     "JaccpotOptions",
     "LeapfrogKDK",
@@ -104,6 +107,7 @@ __all__ = [
     "RebuildingForceModel",
     "ShardedDirectSumGravity",
     "ShardedForceModel",
+    "ShortRangeSplit",
     "assert_fused_boundary_selected",
     "block_kdk_base_step",
     "block_kdk_rollout",

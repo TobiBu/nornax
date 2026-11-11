@@ -31,7 +31,7 @@ reads it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import jax
 import jax.numpy as jnp
@@ -105,6 +105,9 @@ class FusedHybridForce:
         (``cross="fmm"``).
     params : Any
         The galaxy force's parameters (``None``: the engine's own).
+    split_kind : ClassVar[str]
+        The split it implements: ``"membership"`` (the cluster's stars out of the
+        galaxy's tree).
     """
 
     galaxy: Any
@@ -113,6 +116,7 @@ class FusedHybridForce:
     cluster: Any = None
     galaxy_plan: Any = None
     params: Any = None
+    split_kind: ClassVar[str] = "membership"
 
     def __post_init__(self) -> None:
         if self.cross not in _CROSS:

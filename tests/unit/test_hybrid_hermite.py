@@ -23,7 +23,12 @@ import numpy as np
 import pytest
 
 from nornax.forces.direct import DirectSumGravity
-from nornax.hybrid import DirectSlowForce, HybridHermite, hybrid_rollout
+from nornax.hybrid import (
+    DirectSlowForce,
+    HybridHermite,
+    MembershipSplit,
+    hybrid_rollout,
+)
 from nornax.initialize import initialize_state
 from nornax.solvers.hermite4 import hermite4_step
 from nornax.solvers.hermite6 import hermite6_step
@@ -54,7 +59,7 @@ def _scheme(order: int = 4, coupled: bool = True, n_sub: int = 4) -> HybridHermi
     return HybridHermite(
         n_sub=n_sub,
         order=order,
-        internal=DirectSumGravity(G=1.0, softening=EPS),
+        split=MembershipSplit(DirectSumGravity(G=1.0, softening=EPS)),
         coupled=coupled,
     )
 
@@ -305,3 +310,37 @@ def test_fused_hybrid_force_refuses_bad_configurations():
         FusedHybridForce(galaxy=_StubProvider(), cross="nope")
     with pytest.raises(ValueError, match="galaxy_plan"):
         FusedHybridForce(galaxy=_StubProvider(), cluster=_StubProvider())
+
+
+def test_the_split_is_one_seam():
+    from nornax.hybrid import ShortRangeSplit
+
+    split = MembershipSplit(DirectSumGravity(G=1.0, softening=EPS))
+    assert isinstance(split, ShortRangeSplit) and split.kind == "membership"
+    k = split.pair_weight(
+        jnp.asarray([0.1, 4.0, 0.0]), jnp.asarray([True, True, False])
+    )
+    np.testing.assert_array_equal(np.asarray(k), [1.0, 1.0, 0.0])
+    scheme = HybridHermite(split=split)
+    assert scheme.internal is split.internal
+
+    class _Changeover:
+        kind = "changeover"
+
+        def fast_force(self):
+            return split.internal
+
+        def pair_weight(self, r2, both_members):
+            return jnp.exp(-r2)
+
+    with pytest.raises(NotImplementedError, match="changeover"):
+        HybridHermite(split=_Changeover())
+    with pytest.raises(TypeError, match="ShortRangeSplit"):
+        HybridHermite(split=object())
+
+    class _OtherSlow(DirectSlowForce):
+        split_kind = "changeover"
+
+    xg, vg, mg, *_ = _system()
+    with pytest.raises(ValueError, match="changeover"):
+        scheme.initial_state(_OtherSlow(softening=EPS), galaxy=(xg, vg, mg))

@@ -35,7 +35,7 @@ pytest.importorskip(
 from nornax.adapters import FusedProviderForce  # noqa: E402
 from nornax.adapters.jaccpot_hybrid import FusedHybridForce  # noqa: E402
 from nornax.forces.direct import DirectSumGravity  # noqa: E402
-from nornax.hybrid import HybridHermite, hybrid_rollout  # noqa: E402
+from nornax.hybrid import HybridHermite, MembershipSplit, hybrid_rollout  # noqa: E402
 from nornax.initialize import initialize_state  # noqa: E402
 from nornax.solvers.hermite4 import hermite4_step  # noqa: E402
 from nornax.solvers.leapfrog_kdk import leapfrog_kdk_rollout  # noqa: E402
@@ -117,7 +117,7 @@ def _scheme(coupled: bool = True) -> HybridHermite:
     return HybridHermite(
         n_sub=N_SUB,
         order=4,
-        internal=DirectSumGravity(G=1.0, softening=EPS_C),
+        split=MembershipSplit(DirectSumGravity(G=1.0, softening=EPS_C)),
         coupled=coupled,
     )
 
