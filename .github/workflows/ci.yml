@@ -63,11 +63,12 @@ jobs:
   # jaccpot and yggdrax from GitHub at PINNED commits and runs those tests on CPU in
   # float64 (the fused-lane files run their Pallas kernels in interpret mode).
   #
-  # PINS: jaccpot main 1bb30620 (2026-11-05, #502: forward mode, the custom_jvp
-  # seams test_jaccpot_provider_gradients' jvp fixture uses) and yggdrax ac87500
-  # (#106, what jaccpot's gates were measured on). Bump them together: jaccpot's
-  # `yggdrax>=0.0.1` and jax window (>=0.11.2,<0.12) are what the resolver reconciles.
-  # Local (2026-11-05, jax 0.11.2, one process): 77 passed, 31 min, 10.6 GB RSS.
+  # PINS: jaccpot main 122b2228 (2026-11-12, #519: target_points, which the hybrid
+  # Hermite tests use; also #520 M3 checkpoints) and yggdrax ba82e37 (#110, the
+  # Pallas walk move; it has everything jaccpot main imports). Bump them together:
+  # jaccpot's `yggdrax>=0.0.1` and jax window (>=0.11.2,<0.12) are what the resolver
+  # reconciles. Local (2026-11-12, jax 0.11.2, one process, jaccpot at #519's head
+  # f2cda4d4 before #520): 86 passed, 48 min.
   solver-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -75,7 +76,7 @@ jobs:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
       YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: c737829ef877d701b5c26258f74fd5a5e7133286
+      JACCPOT_REF: 122b2228fddd4227336d1cfdaaeb0c854b000737
 
     steps:
       - name: Checkout
@@ -108,3 +109,4 @@ jobs:
           tests/integration/test_jaccpot_provider_shooting.py
           tests/integration/test_jaccpot_provider_rollout.py
           tests/integration/test_jaccpot_sharded.py
+          tests/integration/test_jaccpot_hybrid.py
