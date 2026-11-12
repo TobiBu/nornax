@@ -243,11 +243,24 @@ def test_the_rollout_is_the_particle_carry_and_the_runner(nornax_run):
         want = np.asarray(want)
         assert _differ(final.positions, want[:, 0]) == 0
         if nornax_run["external"]:
+            # The positions above are bitwise: the two programs differ only in the
+            # LAST half-kick, v + (0.5 dt) a with the halo field inside a, which each
+            # program compiles on its own; whether XLA:CPU contracts it into an FMA
+            # depends on the fusion and the runner host's ISA. That is one rounding
+            # of the kick's OPERANDS, so it is measured in ulp of |v| + |0.5 dt a|:
+            # in ulp of the result, a component where v and 0.5 dt a nearly cancel
+            # inflates it (8 ulp on one of 1536 entries on a GitHub runner,
+            # 2026-11-10; at most 1 locally).
             got, ref = np.asarray(final.velocities), want[:, 1]
-            ulp = np.abs(got - ref) / np.spacing(np.abs(ref))
+            kick = np.abs(0.5 * DT * np.asarray(final.acc))
+            diff = np.abs(got - ref)
+            ulp = diff / np.spacing(np.abs(ref) + kick)
+            ulp_result = diff / np.spacing(np.abs(ref))
             assert np.all(ulp <= 2), (
-                f"velocities: max {ulp.max():.1f} ulp, {int(np.sum(ulp > 2))} of "
-                f"{ulp.size} entries above 2 ulp, {int(np.sum(ulp > 0))} differ"
+                f"velocities: max {ulp.max():.1f} ulp of the kick's operands "
+                f"({ulp_result.max():.1f} ulp of the result), "
+                f"{int(np.sum(ulp > 2))} of {ulp.size} entries above 2, "
+                f"{int(np.sum(diff > 0))} differ"
             )
         else:
             assert _differ(final.velocities, want[:, 1]) == 0
