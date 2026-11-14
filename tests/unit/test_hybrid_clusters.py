@@ -487,3 +487,109 @@ def test_skip_massless_direct_sum():
                 continue
             np.testing.assert_allclose(np.asarray(b[:10]), np.asarray(a), rtol=1e-12)
             assert np.all(np.isfinite(np.asarray(b))) and not np.any(np.asarray(b[10:]))
+
+
+# ---------------------------------------------------------------------------
+# FusedClustersForce's orchestration on stub providers (no jaccpot needed)
+# ---------------------------------------------------------------------------
+
+
+class _Field:
+    def __init__(self, acc, ok=True, needs=(3, 2), force_scale=None):
+        self.acc = acc
+        self.ok = jnp.asarray(ok)
+        self.needs = jnp.asarray(needs, jnp.int32)
+        self.force_scale = force_scale
+
+
+class _Engine:
+    G = 1.0
+    softening = EPS
+
+
+class _Stub:
+    """Galaxy self-force ``-x``, field at targets ``-0.5 x``; star field ``0.25``."""
+
+    engine = _Engine()
+
+    def __init__(self):
+        self.calls = []
+
+    def step(self, x, m, params=None, aux=None):
+        self.calls.append("step")
+        return -x, (None, None, None)
+
+    def step_with_targets(self, x, m, pts, plan, params=None, aux=None, **kw):
+        self.calls.append("step_with_targets")
+        return -x, (None, None, None), _Field(-0.5 * pts, force_scale=None)
+
+    def rebuild(self, x, m, force_scale=None):
+        self.calls.append("rebuild")
+        return x
+
+    def target_field(self, topo, pts, plan, softening=None, potential=False):
+        self.calls.append("target_field")
+        return _Field(jnp.full_like(pts, 0.25), needs=(1, 5))
+
+    def capacity_ok(self, topo):
+        return jnp.asarray(True)
+
+
+def test_fused_clusters_force_orchestration_on_a_stub():
+    from nornax.adapters.jaccpot_hybrid import FusedClustersForce
+
+    xg, vg, mg, xc, vc, mc = _system(K=2)
+    gal, stars = _Stub(), _Stub()
+    force = FusedClustersForce(
+        galaxy=gal,
+        stars_plan="ps",
+        num_galaxy=int(xg.shape[0]),
+        reserve=0,
+        shape=(2, int(mc.shape[1])),
+        cross="fmm",
+        coupling="none",
+        clusters=stars,
+        galaxy_plan="pg",
+    )
+    assert force.rows == xg.shape[0] and force.G == 1.0
+    assert not force.couples_clusters
+    n = jnp.asarray(xg.shape[0], jnp.int32)
+    a_g, a_c, aux = force.cluster_slow_accelerations(xg, mg, n, None, None)
+    assert a_c is None and gal.calls == ["step"]
+    a_g, a_c, aux = force.cluster_slow_accelerations(xg, mg, n, xc, mc, aux=aux)
+    assert gal.calls[1:] == ["step_with_targets"]
+    assert stars.calls == ["rebuild", "target_field"]
+    np.testing.assert_allclose(np.asarray(a_g), -np.asarray(xg) + 0.25)
+    np.testing.assert_allclose(np.asarray(a_c), -0.5 * np.asarray(xc))
+    assert a_c.shape == xc.shape
+    _, _, ok, needs = aux
+    assert bool(ok) and np.asarray(needs).tolist() == [3, 5]
+    # no force scale: admit is the identity; with one it seeds |a| at the rows
+    assert force.admit(aux, jnp.zeros(4, jnp.int32), jnp.ones((4, 3))) is aux
+    seeded = force.admit(
+        ((jnp.zeros(6), None, None), None, ok, needs),
+        jnp.asarray([2, 6, 6, 4], jnp.int32),
+        jnp.asarray([[3.0, 4.0, 0.0], [1, 1, 1], [1, 1, 1], [0.0, 0.0, 2.0]]),
+    )
+    np.testing.assert_allclose(np.asarray(seeded[0][0]), [0, 0, 5, 0, 2, 0])
+    # a rollout over the stub runs the scheme's calls
+    scheme = _scheme()
+    state = scheme.initial_state(force, galaxy=(xg, vg, mg), clusters=(xc, vc, mc))
+    _, rec = cluster_rollout(
+        state, 0.01, scheme, force, n_steps=2, record_fn=lambda s: s.time
+    )
+    np.testing.assert_allclose(np.asarray(rec), [0.01, 0.02])
+
+
+def test_fused_clusters_force_refuses_bad_configurations():
+    from nornax.adapters.jaccpot_hybrid import FusedClustersForce
+
+    kw = dict(galaxy=_Stub(), stars_plan=None, num_galaxy=4, reserve=0, shape=(1, 2))
+    with pytest.raises(ValueError, match="cross"):
+        FusedClustersForce(cross="nope", **kw)
+    with pytest.raises(ValueError, match="coupling"):
+        FusedClustersForce(coupling="nope", **kw)
+    with pytest.raises(ValueError, match="cross"):
+        FusedClustersForce.prepare(
+            None, None, None, None, None, None, leaf_size=1, max_order=1, cross="x"
+        )

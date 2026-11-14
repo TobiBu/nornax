@@ -1,4 +1,4 @@
-# Hybrid Hermite: direct-sum clusters inside an FMM galaxy (design note, session 1)
+# Hybrid Hermite: direct-sum clusters inside an FMM galaxy (design note, sessions 1-2)
 
 Multi-node accuracy plan, decision U6 (2026-11-03). The science driver is
 **globular clusters with direct-sum internal dynamics inside a live Milky Way**:
@@ -9,8 +9,9 @@ the split of work: nornax owns the scheme (`nornax.hybrid`), jaccpot owns the fo
 owns the science layer (ICs, demo; session 2+).
 
 Session 1 (2026-11-11) covers one cluster, the force split, the time integration,
-jaccpot `target_points`, and the gates below. Session 2+ is planned at the end of
-this note.
+jaccpot `target_points`, and the gates of section 5. Session 2 (2026-11-15) adds
+many clusters (section 8), stripping (section 9) and the hybrid's default galaxy
+criterion (section 10), with its gates in section 11. Section 12 plans session 3+.
 
 ## 0. User direction (2026-11-11, relayed by the lead; binding for session 1, not a final design lock)
 
@@ -275,7 +276,7 @@ halving.
 
 The record is in jaccpot's `docs/production_2026-11.md` (## HH).
 
-## 6. Session 2+ plan (not built)
+## 6. Session 2+ plan (session 1's; items 1 and 2 are built in session 2: sections 8 and 9)
 
 1. **Many clusters.** A batch of K clusters as `[K, M_max]` padded direct sums
    (`vmap` over clusters, a live mask per star), with one target plan over all
@@ -395,3 +396,182 @@ shorter slow steps if `r_out` must stay small.
 region, they are feasible once the changeover split (section 2) and adaptive fast steps (section 6, item 3) exist.
 The first measurement would be the fast-set size and the substep distribution in a 1e6-star dwarf at dt_slow 0.1 and
 0.01 Myr.
+
+## 8. Many clusters (session 2)
+
+`nornax.hybrid_clusters.ClusterHybridHermite` integrates `K` clusters with the scheme of section 3. Their stars are a
+padded `[K, M_max]` batch, an `NBodyState` whose leaves carry a leading cluster axis.
+
+**Empty slots.** A slot with zero mass is empty: padding of a small cluster, or a star that has been stripped.
+
+- The internal force skips every pair with a massless end (`DirectSumGravity(skip_massless=True)`; the scheme switches
+  it on, the default stays off so no other program changes). Two empty slots may coincide without softening.
+- An empty slot has zero velocity, zero slow acceleration (the scheme zeroes it) and zero derivatives, so Hermite's
+  predictor and corrector leave it exactly where it is.
+
+**The fast flow** maps the Hermite steps over the clusters: `vmap` (`cluster_batch=None`) or `lax.map` over chunks of
+`cluster_batch` clusters. The pair tensors are then `cluster_batch x M_max^2` (`x block` with a blocked internal force,
+`DirectSumGravity(block_size=)`), not `K x M_max^2`. The internal derivatives are recomputed per cluster after each
+opening kick, as in section 3.
+
+**One slow evaluation for all clusters** (`ClusterSlowForce.cluster_slow_accelerations(xg, mg, n_live, xc, mc)`):
+
+- galaxy -> stars: one `target_points` evaluation over all `K x M_max` slots (an empty slot's field is discarded);
+- stars -> galaxy: one star provider over all slots (geometric criterion, a small softening for its own walk), its
+  field at the galaxy's rows with the galaxy's softening (`target_field(softening=)`), as session 1's back-reaction;
+- cluster -> cluster, the `coupling`:
+  - `"fmm"`: the star provider's field at the stars minus each cluster's own field (exact, galaxy kernel, self pair
+    included). What remains of a cluster's own pairs is the FMM's error on them (the A-type error of section 1).
+    Measured in section 11;
+  - `"direct"`: the pairs between stars of different clusters, `O((K M)^2)`: the reference, and small systems;
+  - `"none"`: clusters feel the galaxy only. They still all act on the galaxy.
+
+The cross pairs (star-galaxy and star-star of different clusters) use the galaxy's softening kernel: only a cluster's
+own pairs are collisional.
+
+**Implementations.**
+
+- `nornax.adapters.jaccpot_hybrid.FusedClustersForce` (jaccpot's fused lane; `prepare`, `with_reserve`, `admit`,
+  `verdict`, `energy`). With `reserve=0` and one cluster it makes session 1's `FusedHybridForce` calls one for one.
+- `nornax.hybrid_clusters.DirectClustersForce` (Plummer direct sums, target-blocked): the reference, pair by pair.
+
+**What is batched and what is not.** The internal direct sums are padded to `M_max`: clusters of very different sizes
+waste `K M_max^2 - sum M_k^2` pair evaluations. Bucketing clusters by size (one batch per bucket) is a session-3
+option if it binds. Clusters share the slow step; each has its own fixed internal step `dt / n_sub` (Aarseth steps:
+section 12).
+
+## 9. Stripping (session 2)
+
+**Where the stars go.** The galaxy has `N_g + R` rows: its `N_g` particles, then the stripped stars in the order they
+left, then `R - n_stripped` free rows (row 0's position, zero velocity and mass). Only the first `n_live` rows are
+particles; `n_live` is a traced `int32` in the carry, so a transfer recompiles nothing. The slow force builds the
+galaxy's tree over the live rows in their own box, the rest massless and in no leaf:
+
+- `provider.rebuild(bounds=live_bounds(...), num_valid=n_live)`: the multi-GPU lane's capacity-padded cut, which
+  `jaccpot.escapers` uses for its escaper split. **No jaccpot change was needed.**
+- The eager prepare builds the same tree (`eager_live_rows`, a caps-only prepare in the live rows' box).
+- Measured (CPU route, 2000 particles, leaf 16, p4, both `dehnen` and `dehnen_error`): the padded galaxy's forces on
+  its `N` live rows equal the plain `N`-row provider's **bitwise**, for `R` = 64 and 256, and with 20 stripped stars
+  appended they are the same bitwise for `R` = 64 and 256. The rows past `n_live` get exactly zero.
+
+**When a star leaves** (`StrippingPolicy`, checked at segment edges by `run_segments`):
+
+- The cluster's centre of mass `X`, velocity `V` and mass `M_b` are those of its filled slots.
+- **The tidal tensor** is a mass-weighted least-squares fit of the slow field the stars already have,
+  `a_i ~ A + T (x_i - X)`, symmetrised (`tidal_tensor`). It costs no force evaluation and averages the slow force's
+  error over the stars. The finite-difference alternative (six `target_points` per cluster) was not needed: the fit
+  reproduces the analytic Jacobi radius around a point mass to `1e-3` (test) and a linear field to `1e-10`.
+- `r_J = (G M_b / lambda_eff)^(1/3)` with `lambda_eff = lambda_max(T) + Omega^2` (Renaud, Gieles & Boily 2011's
+  effective tidal tensor; exact for a circular orbit). `Omega = |dX x dV| / |dX|^2` about the galaxy's live centre of
+  mass, or a fixed `centre=`. `rotation=False` uses the bare tensor (a `(3/2)^(1/3)` larger radius around a point
+  mass). In a compressive field (`lambda_eff <= 0`) nothing strips.
+- A star farther than `r_factor * r_J` (default 2, the NBODY codes' escaper radius) from `X` for `dwell` consecutive
+  checks (default 1) leaves.
+- A cluster left with fewer than `min_members` stars (default 8) is dissolved: its remaining stars leave too.
+
+**The transfer** (`transfer`, traced):
+
+- the star keeps its position and velocity and fills the next free row (cluster-major order);
+- its slot becomes empty (the position is kept, at rest), `n_live` grows, and its id moves to `galaxy_star_id`;
+- the slow force seeds the new row's carried value (`admit`: under `dehnen_error` its f_b is the magnitude of the
+  slow acceleration it had, the escapers' convention);
+- `refresh` re-evaluates the slow force and the internal derivatives in the new representation before the next step
+  (the carried accelerations belong to the old one).
+
+**The energy ledger.** A transfer changes the Hamiltonian, not the state:
+
+- the star's pairs with its former cluster go from the internal kernel (`-G m m / sqrt(r^2 + eps_c^2)`, Hermite) to
+  the galaxy's (`-G m m psi_g(r)`, leapfrog + FMM);
+- with `coupling="none"` it also starts to attract the other clusters' stars.
+
+`transfer_jump` sums exactly these pairs in fp64 and adds them to `state.ledger`; `E - ledger` (`E_ledgered`) is the
+conserved quantity, as in `jaccpot.escapers`. On the direct-sum force the ledger IS the jump: the star-galaxy and
+star-other-cluster pairs use the galaxy kernel on both sides. On the FMM force the star's interaction with the galaxy
+also moves from `target_points` to the tree, which differs by the multipole error only; that part is not in the
+ledger, and `run_segments(measure_jumps=True)` measures the full jump (two energy evaluations per transfer edge).
+
+**Capacity.** `run_segments` counts the candidates first. If the free rows cannot hold them, it re-plans before the
+transfer: `slow.with_reserve(state, R_new)` with `R_new = max(grow * R, needed)` re-prepares the galaxy provider over
+`N_g + R_new` rows at the current positions, re-sizes the target plans and grows the state (`grow_reserve`; the
+galaxy f_b is padded). Every program then compiles once more. Nothing is rolled back, because the check runs before
+anything moves.
+
+**No recapture.** A stripped star stays a galaxy particle:
+
+- beyond `2 r_J` a star is unbound or on a transient (potential-escaper) orbit. With `r_factor >= 2`, returns into the
+  cluster's direct-sum region are rare and short;
+- a returning star would have to leave the galaxy's rows. That leaves a hole in the live block, which needs a row
+  permutation (the escapers' machinery) or a free list in the tree's live cut, for little physics;
+- its interaction with the cluster stays: it is a softened (`eps_g`) pair. So the error of not recapturing is the
+  softening of a few weak, distant pairs.
+
+The `dwell` counter is the hysteresis against a star that grazes the radius; no return radius is needed without
+recapture.
+
+## 10. The default galaxy criterion for hybrid runs: `dehnen_error`
+
+`nornax.adapters.jaccpot_hybrid.galaxy_solver(**kwargs)` builds the galaxy's `FastMultipoleMethod` for a hybrid run on
+the `galaxy` preset, whose criterion is `dehnen_error`: the module constant `HYBRID_GALAXY_MAC = "dehnen_error"`.
+
+- **Why.** Session 1's A/B (section 1): under `dehnen_error` the target walk's error on the tidal field is 0.47-0.50 %,
+  3.4-7.7x smaller than under the geometric criterion. It is also Odisseo's default.
+- **The geometric criterion stays selectable:** `galaxy_solver(mac_type="dehnen", theta=0.6, ...)`.
+- **Changing the default** is one line (`HYBRID_GALAXY_MAC`).
+- The star provider (back-reaction and coupling) stays geometric: its rebuild carries no force scale (session 1).
+
+## 11. Gates (session 2)
+
+GATES_PLACEHOLDER
+
+## 12. Session 3+ plan (not built)
+
+1. **Runner integration.** `ProductionRunner(scheme=HybridScheme(...))`:
+   - the runner's force evaluation becomes `FusedClustersForce.cluster_slow_accelerations` (galaxy step + targets),
+     with the live-row cut its escaper split already uses (`StepParams.live`): stripped stars are tree rows past the
+     galaxy's, exactly like returning escapers;
+   - the carry gains the cluster block (`[K, M]` positions, velocities, masses, internal derivatives, slow
+     acceleration, dwell, star ids), `n_live`, `galaxy_star_id` and the ledger;
+   - membership checks at the runner's segment edges (its escaper checks), the reserve re-plan as one more retry
+     reason next to the walk and tree caps;
+   - the diagnostics rows gain `n_stripped`, `bound_mass[K]`, `strip_ledger`, `energy_ledgered` (the escapers'
+     column), `W_cc`, `W_cc_inter`;
+   - **checkpoints (M3):** the `.npz` and the orbax checkpoint must carry the cluster block, the masks (the masses),
+     `n_live`, `galaxy_star_id`, the dwell counters and the ledger, plus the policy and the reserve in `meta` and the
+     fingerprint. A restart must equal the uninterrupted run bitwise (the M3 gate), stripping included;
+   - the energy diagnostic's `W_gc` and `W_cc_inter` come from `target_points(potential=True)`.
+
+   This is a runner seam for a second carried block and a second force. Design it with the M3 / I2 owners; escapers
+   and stripping should share one live-row mechanism.
+2. **The mesh.**
+   - A cluster is owned by the rank that owns its centre of mass. Its stars move with it at migration, as one block,
+     never split.
+   - The target walk at a cluster's stars runs against the local tree plus the cross-domain imports (M1's symmetric
+     cross).
+   - The back-reaction: each cluster's multipole (quadrupole or a few orders about its centre) is broadcast to every
+     rank, and ranks within a few `r_J` of it receive its stars for an exact near field.
+   - The cluster-cluster coupling: multipoles between ranks, the star tree within a rank.
+   - A stripped star joins the owning rank's tree rows (its mesh capacity reserve), and migrates like any particle
+     after that.
+   - The ledger's jump is per rank, summed at the edge.
+3. **Adaptive internal steps.** Aarseth block steps inside the fast flow (nornax `blockstep` + `AarsethController`),
+   synchronised at each slow step, per cluster (each cluster its own rung distribution; `lax.map` over clusters
+   keeps them independent). Gate: a cluster's internal energy over 100 crossing times at `eps_c -> 0`. A GPU
+   direct-sum Hermite kernel (Pallas) if the `O(K M^2)` sum binds at `M = 1e5`.
+4. **The Odisseo GC-in-MW science layer.**
+   - IC: Milky Way globular clusters on their observed orbits (Baumgardt's catalogue: positions, proper motions,
+     distances, radial velocities, masses, half-mass radii) in the Odisseo MW model, King / Plummer realisations,
+     astropy units -> code units.
+   - A demo notebook: Pal 5 (or a few GCs) forming streams in a 1e6-1e7-particle live MW.
+   - A bundle of K ~ 150 GCs as the scaling case.
+5. **HoreKa timing** (`bench/slurm/hh/`, with HH2a's target-walk sbatch):
+   - the slow step with K = 10-150 clusters against the galaxy step alone;
+   - the internal Hermite sums at M = 1e3-1e5 per cluster;
+   - the transfer edge (candidates, transfer, refresh) and a reserve re-plan;
+   - `coupling="fmm"` against `"none"`.
+6. **Open physics choices** (user decisions):
+   - the strip radius factor (2 r_J);
+   - the tidal estimate: the fit, or finite differences at the centre;
+   - the centre for `Omega` (galaxy COM vs a fixed centre);
+   - the dissolution threshold;
+   - whether a stripped star should keep a star-sized softening against other stripped stars. Today it gets the
+     galaxy's: a stream is collisionless at these resolutions.

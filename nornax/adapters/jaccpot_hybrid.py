@@ -809,16 +809,16 @@ class FusedClustersForce:
             For an unknown ``cross``/``coupling``, rows that are not ``N_g +
             reserve``, or a cluster solver with a force-scale criterion.
         """
+        if cross not in _CROSS:
+            raise ValueError(f"cross must be one of {_CROSS}, got {cross!r}")
+        if coupling not in _COUPLING:
+            raise ValueError(f"coupling must be one of {_COUPLING}, got {coupling!r}")
         from jaccpot import FusedForceProvider
         from jaccpot.escapers import eager_split_inputs
         from jaccpot.runtime.capacity_plan import eager_live_rows
 
         from nornax.hybrid_clusters import pad_galaxy
 
-        if cross not in _CROSS:
-            raise ValueError(f"cross must be one of {_CROSS}, got {cross!r}")
-        if coupling not in _COUPLING:
-            raise ValueError(f"coupling must be one of {_COUPLING}, got {coupling!r}")
         xg = jnp.asarray(xg)
         mg = jnp.asarray(mg)
         if n_live is None:
