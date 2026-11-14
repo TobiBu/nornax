@@ -84,6 +84,26 @@ def _scheme(**kw) -> ClusterHybridHermite:
     return ClusterHybridHermite(**kw)
 
 
+def _assert_same(got, want, maxulp: int = 64) -> None:
+    """Equal, or within ``maxulp`` ulp of each row's largest ``|want|``.
+
+    Bitwise on this host (measured, 2026-11-15). Across DIFFERENT XLA programs the
+    CI's AVX-512 runners differ by a few ulp (COMMON's CI lesson, nornax c0b4ec6a),
+    so cross-program comparisons use this bound; integers stay exact.
+    """
+    got, want = np.asarray(got), np.asarray(want)
+    if not np.issubdtype(want.dtype, np.floating):
+        np.testing.assert_array_equal(got, want)
+        return
+    if want.ndim == 0:
+        scale = np.abs(want)
+    else:
+        scale = np.max(np.abs(want), axis=-1, keepdims=True)
+    assert np.all(np.abs(got - want) <= maxulp * np.spacing(scale)), np.max(
+        np.abs(got - want) / np.spacing(scale)
+    )
+
+
 class _Regrowing(DirectClustersForce):
     """The reference force with a re-plan (the state grows; nothing to prepare)."""
 
@@ -103,7 +123,8 @@ def _rollout(scheme, slow, state, dt, steps):
 
 
 @pytest.mark.parametrize("order", [4, 6])
-def test_one_cluster_is_session_one_bitwise(order):
+def test_one_cluster_is_session_one(order):
+    """Bitwise here; a different program from session 1's (``_assert_same``)."""
     xg, vg, mg, xc, vc, mc = _system()
     old = HybridHermite(n_sub=4, order=order, split=_split())
     s1 = DirectSlowForce(softening=EPS)
@@ -124,7 +145,7 @@ def test_one_cluster_is_session_one_bitwise(order):
         (got.clusters.positions[0], want.cluster.positions),
         (got.clusters.velocities[0], want.cluster.velocities),
     ):
-        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+        _assert_same(a, b)
 
 
 @pytest.mark.parametrize("batch", [None, 1])
@@ -342,7 +363,8 @@ def test_uncoupled_ledger_counts_the_new_cluster_pairs():
     assert abs(de - float(jump)) < 1e-12 * abs(slow.energy(st, scheme)["E"])
 
 
-def test_capacity_replan_matches_the_larger_reserve_bitwise():
+def test_capacity_replan_matches_the_larger_reserve():
+    """Bitwise here (the programs before the re-plan have different row counts)."""
     _, _, _, small, rows_s = _strip_run(reserve=2, measure=False)
     assert any("replanned" in r for r in rows_s)
     first = next(r["replanned"] for r in rows_s if "replanned" in r)
@@ -351,7 +373,7 @@ def test_capacity_replan_matches_the_larger_reserve_bitwise():
     assert not any("replanned" in r for r in rows_b)
     assert first[0] == 2
     for a, b in zip(jax.tree_util.tree_leaves(small), jax.tree_util.tree_leaves(big)):
-        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+        _assert_same(a, b)
     assert [r.get("n_take") for r in rows_s] == [r.get("n_take") for r in rows_b]
 
 

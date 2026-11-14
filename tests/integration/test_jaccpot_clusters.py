@@ -117,6 +117,22 @@ def _system():
     return tuple(map(to, (xg, vg, mg, xc, vc, mc)))
 
 
+def _assert_same(got, want, rel: float = 1e-8) -> None:
+    """Equal, or within ``rel`` of each row's largest ``|want|`` (integers exact).
+
+    Bitwise on this host (measured, 2026-11-15). Across DIFFERENT XLA programs the
+    CI's AVX-512 runners differ by a few ulp (COMMON's CI lesson); with the lane's
+    float32 force one ulp of an acceleration moves a float64 position by ~5e-13 over
+    these four steps, so the bound is relative ``1e-8``, far below any physics.
+    """
+    got, want = np.asarray(got), np.asarray(want)
+    if not np.issubdtype(want.dtype, np.floating):
+        np.testing.assert_array_equal(got, want)
+        return
+    scale = np.abs(want) if want.ndim == 0 else np.max(np.abs(want), -1, keepdims=True)
+    assert np.all(np.abs(got - want) <= rel * np.maximum(scale, 1e-300))
+
+
 def _split():
     return MembershipSplit(DirectSumGravity(G=1.0, softening=EPS_C))
 
@@ -152,7 +168,8 @@ def _run(force, aux, clusters, reserve=0, steps=STEPS):
     return scheme, start, end
 
 
-def test_one_cluster_is_session_one_bitwise():
+def test_one_cluster_is_session_one():
+    """Bitwise here; a different program from session 1's (``_assert_same``)."""
     xg, vg, mg, xc, vc, mc = _system()
     old = HybridHermite(n_sub=N_SUB, split=_split())
     f1, a1 = FusedHybridForce.prepare(
@@ -179,25 +196,20 @@ def test_one_cluster_is_session_one_bitwise():
         (got.clusters.positions[0], want.cluster.positions),
         (got.clusters.velocities[0], want.cluster.velocities),
     ):
-        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+        _assert_same(a, b)
 
 
-def test_an_unused_reserve_changes_nothing_bitwise():
+def test_an_unused_reserve_changes_nothing():
+    """Bitwise here; ``N`` and ``N + R`` rows are different programs."""
     _, _, _, xc, vc, mc = _system()
     f0, a0 = _prepare(xc, mc, reserve=0, coupling="fmm")
     _, _, e0 = _run(f0, a0, (xc, vc, mc))
     f1, a1 = _prepare(xc, mc, reserve=16, coupling="fmm")
     _, _, e1 = _run(f1, a1, (xc, vc, mc), reserve=16)
     assert f0.verdict(e0.aux) == (True, True) and f1.verdict(e1.aux) == (True, True)
-    np.testing.assert_array_equal(
-        np.asarray(e1.galaxy_positions[:N]), np.asarray(e0.galaxy_positions)
-    )
-    np.testing.assert_array_equal(
-        np.asarray(e1.clusters.positions), np.asarray(e0.clusters.positions)
-    )
-    np.testing.assert_array_equal(
-        np.asarray(e1.cluster_acc), np.asarray(e0.cluster_acc)
-    )
+    _assert_same(e1.galaxy_positions[:N], e0.galaxy_positions)
+    _assert_same(e1.clusters.positions, e0.clusters.positions)
+    _assert_same(e1.cluster_acc, e0.cluster_acc)
 
 
 def _strip(reserve):
@@ -241,7 +253,8 @@ def test_stripping_on_the_fused_lane():
     assert abs(e1["E_ledgered"] - e0["E"]) < 1e-4 * abs(e0["E"])
 
 
-def test_a_full_reserve_replans_to_the_larger_one_bitwise():
+def test_a_full_reserve_replans_to_the_larger_one():
+    """Bitwise here; before the re-plan the two runs' programs differ in rows."""
     _, small_force, _, small, rows_s = _strip(reserve=1)
     grown = [r["replanned"] for r in rows_s if "replanned" in r]
     assert grown and grown[0][0] == 1
