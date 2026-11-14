@@ -245,21 +245,30 @@ def test_the_rollout_is_the_particle_carry_and_the_runner(nornax_run):
         if nornax_run["external"]:
             # The positions above are bitwise: the two programs differ only in the
             # LAST half-kick, v + (0.5 dt) a with the halo field inside a, which each
-            # program compiles on its own; whether XLA:CPU contracts it into an FMA
-            # depends on the fusion and the runner host's ISA. That is one rounding
-            # of the kick's OPERANDS, so it is measured in ulp of |v| + |0.5 dt a|:
-            # in ulp of the result, a component where v and 0.5 dt a nearly cancel
-            # inflates it (8 ulp on one of 1536 entries on a GitHub runner,
-            # 2026-11-10; at most 1 locally).
+            # program compiles on its own, so the bound has two terms:
+            # * the kick's own rounding (FMA contraction or not): 2 ulp of its
+            #   operands |v| + |0.5 dt a| (in ulp of the result, a component where
+            #   v and 0.5 dt a nearly cancel inflates it);
+            # * the force entering it: on AVX-512 hosts XLA:CPU rounds the two
+            #   programs' a differently (jaccpot #521: up to 2 ulp of |a| between
+            #   two programs), so 0.5 dt times 4 ulp of the particle's |a|.
+            # GitHub runners, 2026-11-12 (8 hosts): AVX2 EPYC 7763 and Xeon 8370C at
+            # most 1 ulp of the operands; EPYC 9V74 / 9V45 4 ulp of the operands on
+            # particle 242's a_y (|a_y| = 4.4 against |a| = 228, diff 1.7e-18, 0.03
+            # of the force term). Locally at most 1.
             got, ref = np.asarray(final.velocities), want[:, 1]
-            kick = np.abs(0.5 * DT * np.asarray(final.acc))
+            acc = np.asarray(final.acc)
+            kick = np.abs(0.5 * DT * acc)
+            a_row = np.linalg.norm(acc, axis=1, keepdims=True)
             diff = np.abs(got - ref)
+            bound = 2 * np.spacing(np.abs(ref) + kick) + 0.5 * DT * 4 * np.spacing(
+                a_row
+            )
             ulp = diff / np.spacing(np.abs(ref) + kick)
-            ulp_result = diff / np.spacing(np.abs(ref))
-            assert np.all(ulp <= 2), (
-                f"velocities: max {ulp.max():.1f} ulp of the kick's operands "
-                f"({ulp_result.max():.1f} ulp of the result), "
-                f"{int(np.sum(ulp > 2))} of {ulp.size} entries above 2, "
+            assert np.all(diff <= bound), (
+                f"velocities: {int(np.sum(diff > bound))} of {diff.size} entries "
+                f"above the bound (max {float(np.max(diff / bound)):.2f} of it), "
+                f"max {ulp.max():.1f} ulp of the kick's operands, "
                 f"{int(np.sum(diff > 0))} differ"
             )
         else:
