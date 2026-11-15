@@ -75,6 +75,7 @@ __all__ = [
     "cluster_rollout",
     "grow_reserve",
     "pad_galaxy",
+    "park_rows",
     "run_segments",
     "strip_candidates",
     "tidal_tensor",
@@ -214,12 +215,53 @@ def _zero_dead(arr: Any, live: Any) -> Any:
     return jnp.where(live, arr, jnp.zeros((), jnp.asarray(arr).dtype))
 
 
-def pad_galaxy(x: Any, v: Any, m: Any, reserve: int) -> tuple[Any, Any, Any, Any]:
+def park_rows(xc: Any, mc: Any, count: int, fallback: Any) -> Any:
+    """``[count, 3]`` positions for free galaxy rows: the filled star slots, cycled.
+
+    Free rows sit where stripped stars will arrive -- among the clusters -- so a
+    slow force that sizes static plans for the galaxy rows as TARGETS (the
+    back-reaction's) sizes them for stripped stars too. They are not sources (no
+    mass, outside the live rows), and their field is discarded.
+
+    Parameters
+    ----------
+    xc : Any
+        ``[K, M, 3]`` star slots (or ``None``).
+    mc : Any
+        ``[K, M]`` (or ``None``).
+    count : int
+        Rows.
+    fallback : Any
+        ``(3,)`` used without filled stars (the galaxy's row 0).
+
+    Returns
+    -------
+    Any
+        The positions, in ``fallback``'s dtype.
+    """
+    fallback = jnp.asarray(fallback)
+    if count == 0:
+        return jnp.zeros((0, 3), fallback.dtype)
+    if xc is None:
+        return jnp.broadcast_to(fallback, (int(count), 3))
+    xs = jnp.asarray(xc).reshape(-1, 3)
+    filled = jnp.asarray(mc).reshape(-1) > 0
+    order = jnp.argsort(~filled, stable=True)  # the filled slots first, in order
+    n_filled = jnp.sum(filled.astype(jnp.int32))
+    pick = order[jnp.arange(int(count)) % jnp.maximum(n_filled, 1)]
+    return jnp.where(
+        n_filled > 0, jnp.asarray(xs[pick], fallback.dtype), fallback[None, :]
+    )
+
+
+def pad_galaxy(
+    x: Any, v: Any, m: Any, reserve: int, park: Any = None
+) -> tuple[Any, Any, Any, Any]:
     """The galaxy's arrays with ``reserve`` free rows appended.
 
-    Free rows sit on row 0 (a valid point inside the box: a slow force builds its
-    tree over the live rows only, and the back-reaction evaluates them as targets)
-    with zero velocity and mass.
+    Free rows sit at ``park`` (:func:`park_rows`; default row 0), with zero
+    velocity and mass: a slow force builds its tree over the live rows only, and
+    the back-reaction evaluates them as targets.
 
     Parameters
     ----------
@@ -231,6 +273,8 @@ def pad_galaxy(x: Any, v: Any, m: Any, reserve: int) -> tuple[Any, Any, Any, Any
         ``[N_g]`` masses.
     reserve : int
         Free rows ``R``.
+    park : Any
+        ``[R, 3]`` the free rows' positions, or ``None`` (row 0).
 
     Returns
     -------
@@ -243,8 +287,11 @@ def pad_galaxy(x: Any, v: Any, m: Any, reserve: int) -> tuple[Any, Any, Any, Any
     sid = jnp.full((n + r,), -1, jnp.int32)
     if r == 0:
         return x, v, m, sid
+    park = (
+        jnp.broadcast_to(x[:1], (r, 3)) if park is None else jnp.asarray(park, x.dtype)
+    )
     return (
-        jnp.concatenate([x, jnp.broadcast_to(x[:1], (r, 3))]),
+        jnp.concatenate([x, park]),
         jnp.concatenate([v, jnp.zeros((r, 3), v.dtype)]),
         jnp.concatenate([m, jnp.zeros((r,), m.dtype)]),
         sid,
@@ -254,7 +301,8 @@ def pad_galaxy(x: Any, v: Any, m: Any, reserve: int) -> tuple[Any, Any, Any, Any
 def grow_reserve(state: ClusterHybridState, reserve: int) -> ClusterHybridState:
     """``state`` with its galaxy arrays padded to ``N_g + reserve`` rows.
 
-    The new free rows are copies of row 0 with zero velocity, mass and
+    The new free rows are parked among the clusters' filled slots
+    (:func:`park_rows`) with zero velocity, mass and
     acceleration (as :func:`pad_galaxy`). The slow force's ``aux`` is the slow
     force's business (``with_reserve`` pads it).
 
@@ -287,8 +335,15 @@ def grow_reserve(state: ClusterHybridState, reserve: int) -> ClusterHybridState:
     def cat(a: Any, fill: Any) -> Any:
         return jnp.concatenate([a, jnp.broadcast_to(fill, (add,) + a.shape[1:])])
 
+    cl = state.clusters
+    park = park_rows(
+        None if cl is None else cl.positions,
+        None if cl is None else cl.masses,
+        add,
+        x[0],
+    )
     return state._replace(
-        galaxy_positions=cat(x, x[0]),
+        galaxy_positions=jnp.concatenate([x, park]),
         galaxy_velocities=cat(state.galaxy_velocities, jnp.zeros((3,), x.dtype)),
         galaxy_masses=cat(
             state.galaxy_masses, jnp.zeros((), state.galaxy_masses.dtype)
@@ -832,7 +887,13 @@ class ClusterHybridHermite:
         """
         xg, vg, mg = galaxy
         n_g = int(jnp.shape(xg)[0])
-        xg, vg, mg, gsid = pad_galaxy(xg, vg, mg, reserve)
+        park = park_rows(
+            None if clusters is None else clusters[0],
+            None if clusters is None else clusters[2],
+            int(reserve),
+            jnp.asarray(xg)[0],
+        )
+        xg, vg, mg, gsid = pad_galaxy(xg, vg, mg, reserve, park)
         cl = None
         dwell = sid = None
         if clusters is not None:
@@ -1364,6 +1425,7 @@ def run_segments(
     measure_jumps: bool = False,
     record_fn: Any = None,
     on_edge: Any = None,
+    max_retries: int = 2,
 ) -> tuple[ClusterHybridState, Any, list]:
     """Segments of :func:`cluster_rollout` with membership checks at their edges.
 
@@ -1372,8 +1434,10 @@ def run_segments(
     is re-planned first (``slow.with_reserve(state, R_new)``, which returns the
     new slow force and the state grown to ``R_new`` rows, :func:`grow_reserve`);
     then the stars are transferred, the ledger takes the jump and the forces are
-    re-evaluated (:meth:`ClusterHybridHermite.refresh`). Every program is
-    jitted once per slow force (a re-plan compiles a new set).
+    re-evaluated (:meth:`ClusterHybridHermite.refresh`). A slow force with a
+    verdict (``slow_ok``/``replanned``: the fused lane's static capacities) that
+    fails is re-planned and the segment run again from its start. Every program
+    is jitted once per slow force (a re-plan compiles a new set).
 
     Parameters
     ----------
@@ -1400,6 +1464,15 @@ def run_segments(
         Per-step records (as :func:`cluster_rollout`); returned per segment.
     on_edge : Any
         ``on_edge(edge_index, state, row)`` after each edge (eager).
+    max_retries : int
+        Re-plans per segment when the slow force's verdict fails
+        (``slow.slow_ok(aux)`` False; then ``slow.replanned(state)`` and the
+        segment runs again from its start, as the runner's segment retry).
+
+    Raises
+    ------
+    RuntimeError
+        If a segment still fails its verdict after ``max_retries`` re-plans.
 
     Returns
     -------
@@ -1421,10 +1494,32 @@ def run_segments(
     if energy_every:
         e0 = slow.energy(state, scheme)
         rows.append(dict(edge=0, time=float(state.time), energy=e0))
+
+    def fits(sl: Any, st: Any) -> bool:
+        ok = getattr(sl, "slow_ok", None)
+        return True if ok is None else bool(ok(st.aux))
+
     for k in range(int(segments)):
         prog = programs(slow)
+        seg_start = state
         state, rec = prog.segment(state)
         row: dict = dict(edge=k + 1, time=float(state.time))
+        retries = 0
+        while not fits(slow, state):
+            # the runner's segment retry: a static capacity overflowed inside the
+            # segment (its forces were truncated) -> re-plan at the segment's start
+            # and run it again
+            if retries >= int(max_retries):
+                raise RuntimeError(
+                    f"segment {k + 1}: the slow force's verdict failed after "
+                    f"{retries} re-plans"
+                )
+            slow, seg_start = slow.replanned(seg_start)
+            prog = programs(slow)
+            state, rec = prog.segment(seg_start)
+            retries += 1
+        if retries:
+            row["retries"] = retries
         if record_fn is not None:
             row["records"] = rec
         if policy is not None:
@@ -1448,6 +1543,17 @@ def run_segments(
                     e_before = slow.energy(state, scheme)
                 state, jump, _ = prog.transfer(state, take, dwell)
                 state = prog.refresh(state)
+                if not fits(slow, state):
+                    # the new rows outgrew a plan at the refresh: re-plan, refresh
+                    slow, state = slow.replanned(state)
+                    prog = programs(slow)
+                    state = prog.refresh(state)
+                    row["refresh_replanned"] = True
+                    if not fits(slow, state):
+                        raise RuntimeError(
+                            f"edge {k + 1}: the verdict failed after the transfer's "
+                            "re-plan"
+                        )
                 row["jump"] = float(jump)
                 if measure_jumps:
                     e_after = slow.energy(state, scheme)

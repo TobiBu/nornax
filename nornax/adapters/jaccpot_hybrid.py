@@ -817,14 +817,15 @@ class FusedClustersForce:
         from jaccpot.escapers import eager_split_inputs
         from jaccpot.runtime.capacity_plan import eager_live_rows
 
-        from nornax.hybrid_clusters import pad_galaxy
+        from nornax.hybrid_clusters import pad_galaxy, park_rows
 
         xg = jnp.asarray(xg)
         mg = jnp.asarray(mg)
         if n_live is None:
             n_g = int(xg.shape[0])
             if reserve:
-                xg, _, mg, _ = pad_galaxy(xg, jnp.zeros_like(xg), mg, reserve)
+                park = park_rows(xc, mc, int(reserve), xg[0])
+                xg, _, mg, _ = pad_galaxy(xg, jnp.zeros_like(xg), mg, reserve, park)
             n_live = n_g
         else:
             n_g = int(xg.shape[0]) - int(reserve)
@@ -1014,6 +1015,42 @@ class FusedClustersForce:
             **s,
         )
         return force, grown._replace(aux=(aux_g, fb_s, ok, needs))
+
+    def slow_ok(self, aux: Any) -> bool:
+        """Whether every evaluation ``aux`` has seen fitted (both verdicts).
+
+        Parameters
+        ----------
+        aux : Any
+            The carried ``aux``.
+
+        Returns
+        -------
+        bool
+            ``all(verdict(aux))``.
+        """
+        return all(self.verdict(aux))
+
+    def replanned(self, state: Any) -> tuple["FusedClustersForce", Any]:
+        """Re-plan at the state (same reserve) with the verdict reset: the retry.
+
+        Parameters
+        ----------
+        state : Any
+            Where to re-plan (a segment's start, or after a transfer).
+
+        Returns
+        -------
+        tuple[FusedClustersForce, Any]
+            The new force and the state with a fresh verdict in its ``aux``.
+        """
+        force, st = self.with_reserve(state, int(self.reserve))
+        aux_g, fb_s, _, _ = st.aux
+        if aux_g is not None:
+            aux_g = (aux_g[0], None, None)
+        return force, st._replace(
+            aux=(aux_g, fb_s, jnp.asarray(True), jnp.zeros((2,), jnp.int32))
+        )
 
     # ---------------------------------------------------------------- traced
     def _galaxy_with_targets(

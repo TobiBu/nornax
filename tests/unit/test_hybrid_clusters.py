@@ -219,7 +219,7 @@ def test_padding_changes_nothing():
     assert not np.any(np.asarray(got.galaxy_velocities[xg.shape[0] :]))
     np.testing.assert_array_equal(
         np.asarray(got.galaxy_positions[xg.shape[0] :]),
-        np.broadcast_to(np.asarray(xg[0]), (6, 3)),
+        np.asarray(xcp).reshape(-1, 3)[np.flatnonzero(np.asarray(mcp).ravel() > 0)[:6]],
     )
     assert np.all(np.asarray(got.star_id[:, m:]) == -1)
 
