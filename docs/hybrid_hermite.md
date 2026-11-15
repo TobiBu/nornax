@@ -443,7 +443,7 @@ section 12).
 ## 9. Stripping (session 2)
 
 **Where the stars go.** The galaxy has `N_g + R` rows: its `N_g` particles, then the stripped stars in the order they
-left, then `R - n_stripped` free rows (row 0's position, zero velocity and mass). Only the first `n_live` rows are
+left, then `R - n_stripped` free rows (at the origin, zero velocity and mass). Only the first `n_live` rows are
 particles; `n_live` is a traced `int32` in the carry, so a transfer recompiles nothing. The slow force builds the
 galaxy's tree over the live rows in their own box, the rest massless and in no leaf:
 
@@ -453,6 +453,17 @@ galaxy's tree over the live rows in their own box, the rest massless and in no l
 - Measured (CPU route, 2000 particles, leaf 16, p4, both `dehnen` and `dehnen_error`): the padded galaxy's forces on
   its `N` live rows equal the plain `N`-row provider's **bitwise**, for `R` = 64 and 256, and with 20 stripped stars
   appended they are the same bitwise for `R` = 64 and 256. The rows past `n_live` get exactly zero.
+
+**The free rows are invisible to the back-reaction.** The back-reaction evaluates the star tree's field at every
+galaxy row through `target_points`, which groups its points along a Morton curve of their box. Free rows at arbitrary
+places would shift the live rows' groups (a reserve, and its size, would move their back-reaction in the last bits),
+and an overflowing plan would truncate it. So each evaluation puts the free rows on the live point that comes LAST on
+that curve (`_back_targets`): the box and every live group are as without them, and the last live group only gains
+copies of a point it holds. The plan is sized for that layout plus the free rows parked among the clusters (where
+stripped stars arrive, `park_rows`; the capacities are totals, so they add). This uses jaccpot's private
+`_morton_order` (with a replica if it moves: only the invariance, never correctness, depends on it). If a plan still
+overflows (a verdict fails), `run_segments` re-plans at the segment's start and runs it again (`slow.replanned`), as
+the runner's segment retry does; after a transfer it re-plans and refreshes.
 
 **When a star leaves** (`StrippingPolicy`, checked at segment edges by `run_segments`):
 
