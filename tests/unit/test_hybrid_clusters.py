@@ -668,3 +668,38 @@ def test_a_failed_verdict_reruns_the_segment_from_its_start():
             steps_per_segment=1,
             max_retries=2,
         )
+
+
+def test_a_pluggable_reference_kernel():
+    """``DirectClustersForce(kernel=)``: Plummer as a callable is the default to round-off,
+    and the transfer ledger follows the kernel (a compact one here)."""
+    xg, vg, mg, xc, vc, mc = _stripping_system()
+    scheme = _scheme(split=_split(0.01))
+
+    def plummer(r2):
+        inv = jax.lax.rsqrt(r2 + EPS * EPS)
+        return inv * inv * inv, inv
+
+    def compact(r2):  # Newton beyond h, a harmonic core inside (a C0 toy kernel)
+        h = 2.0 * EPS
+        r = jnp.sqrt(r2)
+        g = jnp.where(r > h, 1.0 / jnp.maximum(r2 * r, 1e-300), 1.0 / h**3)
+        psi = jnp.where(r > h, 1.0 / jnp.maximum(r, 1e-300), 1.5 / h - 0.5 * r2 / h**3)
+        return g, psi
+
+    a = DirectClustersForce(softening=EPS)
+    b = DirectClustersForce(softening=EPS, kernel=plummer)
+    sa = scheme.initial_state(a, galaxy=(xg, vg, mg), clusters=(xc, vc, mc), reserve=8)
+    sb = scheme.initial_state(b, galaxy=(xg, vg, mg), clusters=(xc, vc, mc), reserve=8)
+    np.testing.assert_allclose(
+        np.asarray(sb.galaxy_acc), np.asarray(sa.galaxy_acc), rtol=1e-12, atol=1e-14
+    )
+    np.testing.assert_allclose(
+        np.asarray(sb.cluster_acc), np.asarray(sa.cluster_acc), rtol=1e-12, atol=1e-14
+    )
+    c = DirectClustersForce(softening=EPS, kernel=compact)
+    sc = scheme.initial_state(c, galaxy=(xg, vg, mg), clusters=(xc, vc, mc), reserve=8)
+    take = jnp.zeros(mc.shape, bool).at[0, 3].set(True)
+    new, jump, _ = jax.jit(lambda s, t: transfer(s, t, s.dwell, scheme, c))(sc, take)
+    de = c.energy(new, scheme)["E"] - c.energy(sc, scheme)["E"]
+    assert abs(de - float(jump)) < 1e-12 * abs(c.energy(sc, scheme)["E"])

@@ -360,11 +360,13 @@ def _plummer_field_blocked(
     pair_ok: Callable | None = None,
     potential: bool = False,
     block: int = 1024,
+    kernel: Callable | None = None,
 ) -> tuple[Any, Any]:
     """Plummer field (and potential) of ``sources`` at ``targets``, target-blocked.
 
     ``src_ok`` masks the sources; ``pair_ok(t_idx, s_idx)`` (optional) masks
-    pairs by index. Masked pairs contribute exactly zero (``where``, so
+    pairs by index. ``kernel(r2) -> (g, psi)`` replaces Plummer (``eps`` is then
+    unused): a pair's acceleration is ``-G m g dx``, its potential ``-G m psi``. Masked pairs contribute exactly zero (``where``, so
     coincident points are safe without softening).
     """
     t = jnp.asarray(targets)
@@ -387,6 +389,16 @@ def _plummer_field_blocked(
         ok = jnp.broadcast_to(src_ok[None, :], dx.shape[:2])
         if pair_ok is not None:
             ok = ok & pair_ok(ib[:, None], sidx[None, :])
+        if kernel is not None:
+            g, psi = kernel(jnp.where(ok, jnp.sum(dx * dx, axis=-1), 1.0))
+            w = m[None, :] * jnp.where(ok, g, 0.0)
+            acc = -Gd * jnp.sum(w[..., None] * dx, axis=1)
+            pot = (
+                -Gd * jnp.sum(m[None, :] * jnp.where(ok, psi, 0.0), axis=1)
+                if potential
+                else None
+            )
+            return acc, pot
         r2 = jnp.where(ok, jnp.sum(dx * dx, axis=-1) + eps2, 1.0)
         inv = jnp.where(ok, jax.lax.rsqrt(r2), 0.0)
         w = m[None, :] * inv * inv * inv
@@ -422,6 +434,11 @@ class DirectClustersForce:
         systems in a live galaxy; the zero-coupling limit's galaxy).
     block : int
         Target block.
+    kernel : Any
+        ``kernel(r2) -> (g, psi)`` for every slow pair (a pair's acceleration
+        ``-G m g dx``, its potential ``-G m psi``), or ``None``: Plummer with
+        ``softening``. A compact kernel (the FMM galaxy's ferrers3) makes the
+        reference the same Hamiltonian as the fused lane's.
     split_kind : ClassVar[str]
         ``"membership"``.
     """
@@ -431,6 +448,7 @@ class DirectClustersForce:
     coupling: str = "direct"
     back_reaction: bool = True
     block: int = 1024
+    kernel: Any = None
     split_kind: ClassVar[str] = "membership"
 
     def __post_init__(self) -> None:
@@ -446,8 +464,10 @@ class DirectClustersForce:
         return self.coupling != "none"
 
     def pair_potential(self, r2: Any) -> Any:
-        """``1 / sqrt(r^2 + eps^2)``."""
+        """``1 / sqrt(r^2 + eps^2)`` (or the ``kernel``'s ``psi``)."""
         r2 = jnp.asarray(r2)
+        if self.kernel is not None:
+            return self.kernel(r2)[1]
         return jax.lax.rsqrt(r2 + jnp.asarray(self.softening**2, r2.dtype))
 
     def _fields(
@@ -466,6 +486,7 @@ class DirectClustersForce:
             pair_ok=lambda i, j: i != j,
             potential=potential,
             block=blk,
+            kernel=self.kernel,
         )
         if xc is None:
             return a_g, p_g, None, None, None
@@ -475,13 +496,29 @@ class DirectClustersForce:
         live_s = ms > 0
         if self.back_reaction:
             a_b, p_b = _plummer_field_blocked(
-                xg, xs, ms, live_s, G, eps, potential=potential, block=blk
+                xg,
+                xs,
+                ms,
+                live_s,
+                G,
+                eps,
+                potential=potential,
+                block=blk,
+                kernel=self.kernel,
             )
             a_g = a_g + a_b
         else:
             p_b = None
         a_c, p_c = _plummer_field_blocked(
-            xs, xg, mg, live_g, G, eps, potential=potential, block=blk
+            xs,
+            xg,
+            mg,
+            live_g,
+            G,
+            eps,
+            potential=potential,
+            block=blk,
+            kernel=self.kernel,
         )
         p_cc = None
         if self.couples_clusters:
@@ -496,6 +533,7 @@ class DirectClustersForce:
                 pair_ok=lambda i, j: cid[jnp.minimum(i, K * M - 1)] != cid[j],
                 potential=potential,
                 block=blk,
+                kernel=self.kernel,
             )
             a_c = a_c + a_cc
             p_cc = None if p_cc is None else p_cc.reshape(K, M)
