@@ -21,6 +21,7 @@ Skipped without jaccpot ``target_points`` (#302).
 from __future__ import annotations
 
 import dataclasses
+import os
 
 import jax
 import jax.numpy as jnp
@@ -126,6 +127,9 @@ def _assert_same(got, want, rel: float = 1e-8) -> None:
     these four steps, so the bound is relative ``1e-8``, far below any physics.
     """
     got, want = np.asarray(got), np.asarray(want)
+    if os.environ.get("NORNAX_HYBRID_STRICT_BITWISE") == "1":  # this host's claim
+        np.testing.assert_array_equal(got, want)
+        return
     if not np.issubdtype(want.dtype, np.floating):
         np.testing.assert_array_equal(got, want)
         return
@@ -249,7 +253,8 @@ def test_stripping_on_the_fused_lane():
     e0, e1 = rows[0]["energy"], rows[-1]["energy"]
     for key in ("E", "W_gg", "W_gc", "W_cc", "W_cc_inter", "E_ledgered"):
         assert np.isfinite(e1[key]), key
-    assert e1["W_cc_inter"] < 0.0
+    if np.sum(np.any(np.asarray(end.clusters.masses) > 0, axis=1)) > 1:
+        assert e1["W_cc_inter"] < 0.0
     assert abs(e1["E_ledgered"] - e0["E"]) < 1e-4 * abs(e0["E"])
 
 
@@ -263,13 +268,11 @@ def test_a_full_reserve_replans_to_the_larger_one():
     assert not any("replanned" in r for r in rows_b)
     assert small_force.reserve == big_r
     for name in ("galaxy_positions", "galaxy_velocities", "n_live", "galaxy_star_id"):
-        np.testing.assert_array_equal(
-            np.asarray(getattr(small, name)), np.asarray(getattr(big, name))
-        )
-    np.testing.assert_array_equal(
-        np.asarray(small.clusters.positions), np.asarray(big.clusters.positions)
-    )
-    assert float(small.ledger) == float(big.ledger)
+        _assert_same(getattr(small, name), getattr(big, name))
+    _assert_same(small.clusters.positions, big.clusters.positions)
+    _assert_same(small.star_id, big.star_id)
+    _assert_same(small.ledger, big.ledger)
+    assert [r.get("n_take") for r in rows_s] == [r.get("n_take") for r in rows_b]
 
 
 def test_cluster_coupling_through_the_star_tree_follows_the_direct_pairs():

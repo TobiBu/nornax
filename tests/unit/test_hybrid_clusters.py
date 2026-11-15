@@ -18,6 +18,8 @@ stars on orbits in it, float64, :class:`~nornax.hybrid_clusters.DirectClustersFo
 
 from __future__ import annotations
 
+import os
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -92,6 +94,9 @@ def _assert_same(got, want, maxulp: int = 64) -> None:
     so cross-program comparisons use this bound; integers stay exact.
     """
     got, want = np.asarray(got), np.asarray(want)
+    if os.environ.get("NORNAX_HYBRID_STRICT_BITWISE") == "1":  # this host's claim
+        np.testing.assert_array_equal(got, want)
+        return
     if not np.issubdtype(want.dtype, np.floating):
         np.testing.assert_array_equal(got, want)
         return
@@ -219,7 +224,7 @@ def test_padding_changes_nothing():
     assert not np.any(np.asarray(got.galaxy_velocities[xg.shape[0] :]))
     np.testing.assert_array_equal(
         np.asarray(got.galaxy_positions[xg.shape[0] :]),
-        np.asarray(xcp).reshape(-1, 3)[np.flatnonzero(np.asarray(mcp).ravel() > 0)[:6]],
+        np.zeros((6, 3)),
     )
     assert np.all(np.asarray(got.star_id[:, m:]) == -1)
 

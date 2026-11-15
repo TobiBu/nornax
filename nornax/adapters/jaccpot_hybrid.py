@@ -30,6 +30,7 @@ reads it.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -595,6 +596,59 @@ def _live_topology(provider: Any, x: Any, m: Any, n_live: Any, force_scale: Any)
     )
 
 
+def _morton_last(points: Any, live: Any) -> Any:
+    """The live point the target walk's Morton order puts LAST (traced).
+
+    ``jaccpot.runtime.target_points._morton_order``'s curve over the live points'
+    box (the free rows folded onto row 0 inside it); ties go to the highest row,
+    as its stable argsort does. A private jaccpot function: if it moves, the
+    replica below is used (a different order only costs the bitwise invariance,
+    never correctness: the free rows' fields are discarded).
+    """
+    pts = jnp.where(live[:, None], points, points[0][None, :])
+    try:
+        from jaccpot.runtime.target_points import _morton_order
+    except ImportError:  # pragma: no cover - the replica
+        _morton_order = None
+    if _morton_order is not None:
+        return pts[_morton_order(pts)[-1]]
+    lo, hi = jnp.min(pts, 0), jnp.max(pts, 0)  # pragma: no cover
+    span = jnp.maximum(
+        jnp.max(hi - lo), jnp.asarray(1e-30, pts.dtype)
+    )  # pragma: no cover
+    q = jnp.clip(((pts - lo) / span) * 1023.0, 0.0, 1023.0)  # pragma: no cover
+    q = q.astype(jnp.uint32)  # pragma: no cover
+
+    def spread(v: Any) -> Any:  # pragma: no cover
+        v = (v | (v << 16)) & jnp.uint32(0x030000FF)
+        v = (v | (v << 8)) & jnp.uint32(0x0300F00F)
+        v = (v | (v << 4)) & jnp.uint32(0x030C30C3)
+        return (v | (v << 2)) & jnp.uint32(0x09249249)
+
+    code = spread(q[:, 0]) | (spread(q[:, 1]) << 1)  # pragma: no cover
+    code = code | (spread(q[:, 2]) << 2)  # pragma: no cover
+    return pts[jnp.argsort(code, stable=True)[-1]]  # pragma: no cover
+
+
+def _back_targets(xg: Any, n_live: Any, provider: Any) -> Any:
+    """The back-reaction's targets: the live rows, the free rows on the LAST live one.
+
+    ``target_points`` groups its points along a Morton curve of their box. Free
+    rows placed on the live point that comes last on that curve leave the box and
+    every live group as without them (the last live group only gains copies of a
+    point it already holds), so neither a reserve nor its size changes a live
+    row's back-reaction: an unused or re-planned reserve matches runs without it
+    bitwise (``docs/hybrid_hermite.md`` section 9). The free rows' fields are
+    discarded.
+    """
+    dtype = getattr(provider.engine, "working_dtype", None) or jnp.asarray(xg).dtype
+    live = jnp.arange(xg.shape[0], dtype=jnp.int32) < jnp.asarray(n_live, jnp.int32)
+    last = _morton_last(jnp.asarray(xg, dtype), live)
+    return jnp.where(
+        live[:, None], xg, jnp.asarray(last, jnp.asarray(xg).dtype)[None, :]
+    )
+
+
 def _fold(bits: Any, needs: Any, bits_in: Any, needs_in: Any) -> tuple[Any, Any]:
     """``FusedForceProvider.step``'s verdict fold (bits OR-ed, needs max-ed while on track)."""
     from jaccpot.runtime.fused_topology import overflow_ok
@@ -824,8 +878,7 @@ class FusedClustersForce:
         if n_live is None:
             n_g = int(xg.shape[0])
             if reserve:
-                park = park_rows(xc, mc, int(reserve), xg[0])
-                xg, _, mg, _ = pad_galaxy(xg, jnp.zeros_like(xg), mg, reserve, park)
+                xg, _, mg, _ = pad_galaxy(xg, jnp.zeros_like(xg), mg, reserve)
             n_live = n_g
         else:
             n_g = int(xg.shape[0]) - int(reserve)
@@ -932,13 +985,34 @@ class FusedClustersForce:
                     "rebuild carries no force scale here)"
                 )
             if cross == "fmm":
+                # sized for the evaluation layout (free rows on the last live
+                # point) PLUS the free rows among the clusters, where stripped
+                # stars arrive: the capacities are totals, so they add
+                n_free = rows - int(n_live)
                 plan_g = clu.plan_targets(
                     ctopo,
-                    xg,
+                    _back_targets(xg, int(n_live), clu) if n_free else xg,
                     group_size=group_size,
                     headroom=headroom,
                     softening=back_eps,
                 )
+                if n_free:
+                    planning = jnp.concatenate(
+                        [xg[: int(n_live)], park_rows(xc, mc, n_free, xg[0])]
+                    )
+                    extra = clu.plan_targets(
+                        ctopo,
+                        planning,
+                        group_size=group_size,
+                        headroom=headroom,
+                        softening=back_eps,
+                    )
+                    plan_g = dataclasses.replace(
+                        plan_g,
+                        far_capacity=int(plan_g.far_capacity) + int(extra.far_capacity),
+                        near_capacity=int(plan_g.near_capacity)
+                        + int(extra.near_capacity),
+                    )
             if coupling == "fmm":
                 plan_cc = clu.plan_targets(
                     ctopo,
@@ -1230,7 +1304,10 @@ class FusedClustersForce:
             fb_s = field.force_scale
             ctopo = self.clusters.rebuild(xs, ms)
             back = self.clusters.target_field(
-                ctopo, xg, self.galaxy_plan, softening=self.back_softening
+                ctopo,
+                _back_targets(xg, n_live, self.clusters) if self.reserve else xg,
+                self.galaxy_plan,
+                softening=self.back_softening,
             )
             ok = ok & back.ok & self.clusters.capacity_ok(ctopo)
             needs = jnp.maximum(needs, back.needs)

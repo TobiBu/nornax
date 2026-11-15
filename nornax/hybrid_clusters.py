@@ -216,12 +216,11 @@ def _zero_dead(arr: Any, live: Any) -> Any:
 
 
 def park_rows(xc: Any, mc: Any, count: int, fallback: Any) -> Any:
-    """``[count, 3]`` positions for free galaxy rows: the filled star slots, cycled.
+    """``[count, 3]`` planning positions for free galaxy rows: the filled star slots, cycled.
 
-    Free rows sit where stripped stars will arrive -- among the clusters -- so a
-    slow force that sizes static plans for the galaxy rows as TARGETS (the
-    back-reaction's) sizes them for stripped stars too. They are not sources (no
-    mass, outside the live rows), and their field is discarded.
+    Stripped stars arrive among the clusters, so a slow force that sizes static
+    plans for the galaxy rows as TARGETS (the back-reaction's) sizes them with
+    the free rows here (``FusedClustersForce.prepare``).
 
     Parameters
     ----------
@@ -259,9 +258,10 @@ def pad_galaxy(
 ) -> tuple[Any, Any, Any, Any]:
     """The galaxy's arrays with ``reserve`` free rows appended.
 
-    Free rows sit at ``park`` (:func:`park_rows`; default row 0), with zero
-    velocity and mass: a slow force builds its tree over the live rows only, and
-    the back-reaction evaluates them as targets.
+    Free rows sit at ``park`` (default: the origin), with zero velocity and mass.
+    They are no slow force's sources (the tree is built over the live rows only)
+    and their accelerations are discarded, so where they sit changes nothing; the
+    origin keeps a state independent of when its rows were added.
 
     Parameters
     ----------
@@ -274,7 +274,7 @@ def pad_galaxy(
     reserve : int
         Free rows ``R``.
     park : Any
-        ``[R, 3]`` the free rows' positions, or ``None`` (row 0).
+        ``[R, 3]`` the free rows' positions, or ``None`` (the origin).
 
     Returns
     -------
@@ -287,9 +287,7 @@ def pad_galaxy(
     sid = jnp.full((n + r,), -1, jnp.int32)
     if r == 0:
         return x, v, m, sid
-    park = (
-        jnp.broadcast_to(x[:1], (r, 3)) if park is None else jnp.asarray(park, x.dtype)
-    )
+    park = jnp.zeros((r, 3), x.dtype) if park is None else jnp.asarray(park, x.dtype)
     return (
         jnp.concatenate([x, park]),
         jnp.concatenate([v, jnp.zeros((r, 3), v.dtype)]),
@@ -301,8 +299,8 @@ def pad_galaxy(
 def grow_reserve(state: ClusterHybridState, reserve: int) -> ClusterHybridState:
     """``state`` with its galaxy arrays padded to ``N_g + reserve`` rows.
 
-    The new free rows are parked among the clusters' filled slots
-    (:func:`park_rows`) with zero velocity, mass and
+    The new free rows sit at the origin (:func:`pad_galaxy`) with zero velocity,
+    mass and
     acceleration (as :func:`pad_galaxy`). The slow force's ``aux`` is the slow
     force's business (``with_reserve`` pads it).
 
@@ -335,15 +333,8 @@ def grow_reserve(state: ClusterHybridState, reserve: int) -> ClusterHybridState:
     def cat(a: Any, fill: Any) -> Any:
         return jnp.concatenate([a, jnp.broadcast_to(fill, (add,) + a.shape[1:])])
 
-    cl = state.clusters
-    park = park_rows(
-        None if cl is None else cl.positions,
-        None if cl is None else cl.masses,
-        add,
-        x[0],
-    )
     return state._replace(
-        galaxy_positions=jnp.concatenate([x, park]),
+        galaxy_positions=jnp.concatenate([x, jnp.zeros((add, 3), x.dtype)]),
         galaxy_velocities=cat(state.galaxy_velocities, jnp.zeros((3,), x.dtype)),
         galaxy_masses=cat(
             state.galaxy_masses, jnp.zeros((), state.galaxy_masses.dtype)
@@ -887,13 +878,7 @@ class ClusterHybridHermite:
         """
         xg, vg, mg = galaxy
         n_g = int(jnp.shape(xg)[0])
-        park = park_rows(
-            None if clusters is None else clusters[0],
-            None if clusters is None else clusters[2],
-            int(reserve),
-            jnp.asarray(xg)[0],
-        )
-        xg, vg, mg, gsid = pad_galaxy(xg, vg, mg, reserve, park)
+        xg, vg, mg, gsid = pad_galaxy(xg, vg, mg, reserve)
         cl = None
         dwell = sid = None
         if clusters is not None:
