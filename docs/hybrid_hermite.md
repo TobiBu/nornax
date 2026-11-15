@@ -559,9 +559,38 @@ reference and on the fused lane (`dehnen`, CPU route). Two conditions were neede
 runs its Pallas kernels in interpret mode on CPU), p6, leaf 64; `K` Plummer clusters of 32 stars, M_c 1e-5,
 r_c 3e-3, on random orbits at r = 0.3-3; 60 slow steps of 2e-3; `mn-scratch/hh2b/runs/g3_K*.json`):
 
-GATE3_TABLE
+| K | cluster-cluster field / tidal | `"fmm"` vs `"direct"` coupling, rms (max) / cluster-cluster | / tidal | its internal (COM-free) part / tidal | \|ΔE\|/\|E\| after 60 steps, fmm / direct | \|ΔP\| | \|ΔL\|/\|L\| | stripped | verdicts |
+|---|---|---|---|---|---|---|---|---|---|
+| 10 | 0.0077 | 2.4e-3 (3.8e-3) | 1.9e-5 | 6.5e-6 | 5.3e-6 / 5.3e-6 | 3.1e-9 | 2.1e-6 | 0 | ok |
+| 50 | 0.10 | 4.8e-3 (5.4e-3) | 4.8e-4 | 6.4e-5 | 5.1e-6 / 5.1e-6 | 2.2e-9 | 2.1e-6 | 0 | ok |
+| 150 | 0.17 | 1.0e-2 (1.1e-2) | 1.7e-3 | 3.9e-4 | 5.2e-6 / 5.2e-6 | 6.8e-9 | 2.1e-6 | 2 | ok |
 
-**5. GPU functional.** GATE5_TEXT
+How to read it:
+
+- **Coupling error.** The star tree's error on the cluster-cluster field (the A-type error: all clusters' tree minus
+  each cluster's exact own field) is 0.24-1.0 % of that field, the geometric criterion's tolerance (θ 0.5).
+  - It grows with K because more of the field comes through accepted multipoles.
+  - Relative to the tidal field it is 2e-5 to 1.7e-3, and its part that acts on internal motion is 4e-4 or less.
+- **Conservation** is the galaxy's FMM error (the same to 2e-5 relative with either coupling). With `"fmm"` the
+  cross terms are two approximations, so the momentum moves at the 1e-9 level; with direct pairs both ways it would
+  conserve to round-off (unit tests: |ΔP| ~ 2e-17 on `DirectClustersForce`).
+- The clusters here are compact (r_J >> r_c): the K = 150 run stripped 2 stars, and `E_ledgered` and the raw `E`
+  differ by the ledger, 3e-10.
+
+**5. GPU functional.** Galaxy 1e6 (Hernquist, `galaxy_solver()`: the galaxy preset, `dehnen_error`, leaf 64, p6, eps_g 0.005, fp32) plus
+10 Plummer clusters of 1e4 stars (M_c 1e-4, r_c 0.012, eps_c r_c/20, Hermite 4, n_sub 16, blocked internal sum), at
+r = 0.3-1.5 on circular orbits.
+
+- Run: `cross="fmm"`, `coupling="fmm"`, reserve 4096, 20 edges of 25 steps (dt 2e-3, t = 1.0, about 7.7 cluster
+  crossing times), one contended A100 via `on-free-card`.
+- Result: **1493 stars stripped** (988 at the first edge, then 14-64 per edge); the reserve never filled; both
+  verdicts held; every array finite.
+- Conservation: |ΔE|/|E| <= 1.7e-6 (ledgered the same; the jumps are ~1e-13, the stars being light), |ΔP| <= 1.5e-8,
+  |ΔL| <= 5e-9.
+- **Device peak 2.05e9 B.**
+- Wall time 8.9 h, contended and compile-bound (no timing claim). Two earlier attempts are recorded in
+  `hh2b/STATUS.md`; they found the re-plan costs fixed in `0436129` and `93de0eb` and the retry fixed in `1fbe9e4`.
+- `hh2b/runs/g5_1e6_10x1e4.json`.
 
 **2. Stripping accuracy.** GATE2_TEXT
 
