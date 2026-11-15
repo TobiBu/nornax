@@ -721,9 +721,12 @@ class FusedClustersForce:
       ``docs/hybrid_hermite.md`` section 8); ``"direct"`` the pairs between
       stars of different clusters (``O((K M)^2)``); ``"none"``.
 
-    ``aux = (galaxy_aux, star_f_b, ok, needs)`` as :class:`FusedHybridForce`'s, with
+    ``aux = (galaxy_aux, star_f_b, ok, needs, star_tree)``: the galaxy provider's
+    ``(f_b, bits, needs)``, the stars' f_b, ``ok`` per part (``[4]``: the field at
+    the stars, the back-reaction, the star tree's capacities, the coupling),
     ``needs`` per target plan (``[3, 2]``: the stars', the back-reaction's, the
-    coupling's ``(far, near)``), which :meth:`replanned` grows each plan to.
+    coupling's ``(far, near)``) and the star tree's ``(bits, needs)``.
+    :meth:`replanned` grows each from them.
 
     Attributes
     ----------
@@ -1082,7 +1085,13 @@ class FusedClustersForce:
             seed_g = galaxy_aux
         else:
             seed_g = None if f_b_g is None else (f_b_g, None, None)
-        return force, (seed_g, f_b_s, jnp.asarray(True), jnp.zeros((3, 2), jnp.int32))
+        return force, (
+            seed_g,
+            f_b_s,
+            jnp.ones((4,), bool),
+            jnp.zeros((3, 2), jnp.int32),
+            None,
+        )
 
     def with_reserve(
         self, state: Any, reserve: int
@@ -1107,7 +1116,7 @@ class FusedClustersForce:
             The new force and the grown state (its ``aux`` keeps the verdict).
         """
         grown = self.grow_state(state, int(reserve))
-        aux_g, fb_s, ok, needs = grown.aux
+        aux_g, fb_s, ok, needs, aux_c = grown.aux
         s = dict(self.setup)
         force, _ = FusedClustersForce.prepare(
             s.pop("galaxy_solver"),
@@ -1121,7 +1130,7 @@ class FusedClustersForce:
             galaxy_aux=aux_g,
             **s,
         )
-        return force, grown._replace(aux=(aux_g, fb_s, ok, needs))
+        return force, grown._replace(aux=(aux_g, fb_s, ok, needs, aux_c))
 
     def slow_ok(self, aux: Any) -> bool:
         """Whether every evaluation ``aux`` has seen fitted (both verdicts).
@@ -1161,13 +1170,13 @@ class FusedClustersForce:
 
         add = int(reserve) - int(state.reserve)
         grown = grow_reserve(state, int(reserve))
-        aux_g, fb_s, ok, needs = state.aux
+        aux_g, fb_s, ok, needs, aux_c = state.aux
         if add and aux_g is not None and aux_g[0] is not None:
             f = jnp.asarray(aux_g[0])
             aux_g = (jnp.concatenate([f, jnp.zeros((add,), f.dtype)]),) + tuple(
                 aux_g[1:]
             )
-        return grown._replace(aux=(aux_g, fb_s, ok, needs))
+        return grown._replace(aux=(aux_g, fb_s, ok, needs, aux_c))
 
     def replanned(
         self, state: Any, failed: Any = None
@@ -1196,7 +1205,7 @@ class FusedClustersForce:
         force, st = self.with_reserve(state, int(state.reserve))
         if failed is not None:
             force = force._grown_from(failed.aux, st)
-        aux_g, fb_s, _, needs = st.aux
+        aux_g, fb_s, ok, needs, aux_c = st.aux
 
         def cleared(a: Any) -> Any:
             # the same pytree (a scan's carry), the verdict reset
@@ -1204,8 +1213,16 @@ class FusedClustersForce:
 
         if aux_g is not None:
             aux_g = (aux_g[0], cleared(aux_g[1]), cleared(aux_g[2]))
+        if aux_c is not None:
+            aux_c = (cleared(aux_c[0]), cleared(aux_c[1]))
         return force, st._replace(
-            aux=(aux_g, fb_s, jnp.asarray(True), jnp.zeros_like(jnp.asarray(needs)))
+            aux=(
+                aux_g,
+                fb_s,
+                jnp.ones_like(jnp.asarray(ok)),
+                jnp.zeros_like(jnp.asarray(needs)),
+                aux_c,
+            )
         )
 
     def _grown_from(self, aux: Any, state: Any) -> "FusedClustersForce":
@@ -1227,7 +1244,27 @@ class FusedClustersForce:
             and not self.verdict(aux)[0]
         ):
             out = out._galaxy_caps_grown(np.asarray(aux_g[2]), state)
+        aux_c = aux[4]
+        if (
+            out.clusters is not None
+            and aux_c is not None
+            and not bool(np.asarray(aux[2])[2])
+        ):
+            out = out._star_caps_grown(np.asarray(aux_c[1]), state)
         return out
+
+    def _star_caps_grown(self, needs_c: Any, state: Any) -> "FusedClustersForce":
+        """The star provider re-planned from its own tree's needs (jaccpot's retry)."""
+        K, M = self.shape
+        xs, ms = self._star_slots(
+            state.clusters.positions,
+            state.clusters.masses,
+            jnp.asarray(state.galaxy_positions).dtype,
+        )
+        out = self.clusters.replanned(needs_c, xs, ms)
+        if out is None:
+            return self
+        return dataclasses.replace(self, clusters=out[0])
 
     def _galaxy_caps_grown(self, needs_g: Any, state: Any) -> "FusedClustersForce":
         """The galaxy provider re-planned from its walk/tree needs (jaccpot's retry)."""
@@ -1376,8 +1413,8 @@ class FusedClustersForce:
         tuple[Any, Any, Any]
             The accelerations and the next ``aux``.
         """
-        aux_g, fb_s, ok, needs = (
-            (None, None, jnp.asarray(True), jnp.zeros((3, 2), jnp.int32))
+        aux_g, fb_s, ok, needs, aux_c = (
+            (None, None, jnp.ones((4,), bool), jnp.zeros((3, 2), jnp.int32), None)
             if aux is None
             else aux
         )
@@ -1399,7 +1436,7 @@ class FusedClustersForce:
                 )
                 bits, nd = _fold(bits, topo.needs(), bits_in, needs_in)
                 aux_g = (f_b, bits, nd)
-            return jnp.asarray(acc, xg.dtype), None, (aux_g, fb_s, ok, needs)
+            return jnp.asarray(acc, xg.dtype), None, (aux_g, fb_s, ok, needs, aux_c)
         K, M = self.shape
         dtype = xg.dtype
         xs, ms = self._star_slots(xc, mc, dtype)
@@ -1419,12 +1456,12 @@ class FusedClustersForce:
             ctopo = None
             if self.coupling == "fmm":
                 ctopo = self.clusters.rebuild(xs, ms)
-                ok = ok & self.clusters.capacity_ok(ctopo)
+                ok, aux_c = self._star_tree_verdict(ctopo, ok, aux_c)
         else:
             acc, aux_g, field = self._galaxy_with_targets(
                 xg, mg, n_live, xs, aux_g, fb_s
             )
-            ok = ok & field.ok
+            ok = ok.at[0].set(ok[0] & field.ok)
             needs = needs.at[0].max(jnp.asarray(field.needs, jnp.int32))
             fb_s = field.force_scale
             ctopo = self.clusters.rebuild(xs, ms)
@@ -1434,17 +1471,26 @@ class FusedClustersForce:
                 self.galaxy_plan,
                 softening=self.back_softening,
             )
-            ok = ok & back.ok & self.clusters.capacity_ok(ctopo)
+            ok = ok.at[1].set(ok[1] & back.ok)
+            ok, aux_c = self._star_tree_verdict(ctopo, ok, aux_c)
             needs = needs.at[1].max(jnp.asarray(back.needs, jnp.int32))
             a_g = jnp.asarray(acc, dtype) + jnp.asarray(back.acc, dtype)
             a_c = jnp.asarray(field.acc, dtype)
         if self.coupling != "none":
             a_cc, _, ok_cc, needs_cc = self._coupling_field(xs, ms, ctopo)
             a_c = a_c + a_cc
-            ok = ok & ok_cc
+            ok = ok.at[3].set(ok[3] & ok_cc)
             needs = needs.at[2].max(jnp.asarray(needs_cc, jnp.int32))
         a_c = jnp.asarray(a_c, jnp.asarray(xc).dtype).reshape(K, M, 3)
-        return a_g, a_c, (aux_g, fb_s, ok, needs)
+        return a_g, a_c, (aux_g, fb_s, ok, needs, aux_c)
+
+    def _star_tree_verdict(self, ctopo: Any, ok: Any, aux_c: Any) -> tuple:
+        """Fold the star tree's capacity verdict (``ok[2]``) and its bits/needs."""
+        ok = ok.at[2].set(ok[2] & self.clusters.capacity_ok(ctopo))
+        if not hasattr(ctopo, "overflow_bits"):  # a stub topology (tests)
+            return ok, aux_c
+        bits_in, needs_in = (None, None) if aux_c is None else aux_c
+        return ok, _fold(ctopo.overflow_bits(), ctopo.needs(), bits_in, needs_in)
 
     def _galaxy_force_only(self, xg: Any, mg: Any, n_live: Any, aux_g: Any) -> tuple:
         out = self.cluster_slow_accelerations(
@@ -1453,7 +1499,7 @@ class FusedClustersForce:
             n_live,
             None,
             None,
-            aux=(aux_g, None, jnp.asarray(True), jnp.zeros((3, 2), jnp.int32)),
+            aux=(aux_g, None, jnp.ones((4,), bool), jnp.zeros((3, 2), jnp.int32), None),
         )
         return out[0], out[2][0]
 
@@ -1477,24 +1523,24 @@ class FusedClustersForce:
         Any
             ``aux`` with the new rows' f_b set.
         """
-        aux_g, fb_s, ok, needs = aux
+        aux_g, fb_s, ok, needs, aux_c = aux
         if aux_g is None or aux_g[0] is None:
             return aux
         f = jnp.asarray(aux_g[0])
         mag = jnp.linalg.norm(jnp.asarray(star_acc, f.dtype), axis=-1)
         f = f.at[rows].set(mag, mode="drop")
-        return ((f,) + tuple(aux_g[1:]), fb_s, ok, needs)
+        return ((f,) + tuple(aux_g[1:]), fb_s, ok, needs, aux_c)
 
     # ---------------------------------------------------------------- eager
     def verdict(self, aux: Any) -> tuple[bool, bool]:
         """``(galaxy_ok, targets_ok)`` over every evaluation ``aux`` has seen."""
         from jaccpot.runtime.fused_topology import overflow_ok
 
-        aux_g, _, ok, _ = aux
+        aux_g, _, ok, _, _ = aux
         gal_ok = True
         if aux_g is not None and aux_g[1] is not None:
             gal_ok = bool(overflow_ok(aux_g[1]))
-        return gal_ok, bool(ok)
+        return gal_ok, bool(np.all(np.asarray(ok)))
 
     def energy(self, state: Any, scheme: Any) -> dict:
         """The system's energy, momenta and ledger (eager; fp64 sums).
@@ -1521,7 +1567,7 @@ class FusedClustersForce:
         from nornax.hybrid_clusters import energy_terms
 
         G, kernel, eps = self._engine_kernel()
-        aux_g, fb_s, _, _ = state.aux
+        aux_g, fb_s, _, _, _ = state.aux
         f_b_g = None if aux_g is None else aux_g[0]
         cl = state.clusters
         gal = self.galaxy

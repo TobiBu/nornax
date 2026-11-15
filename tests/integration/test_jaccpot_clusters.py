@@ -222,7 +222,7 @@ def test_a_replanned_force_continues_the_scan():
     force, aux = _prepare(xc, mc, reserve=16, coupling="none")
     scheme, start, end = _run(force, aux, (xc, vc, mc), reserve=16, steps=1)
     again, restart = force.replanned(end)
-    assert again.reserve == force.reserve and bool(restart.aux[2])
+    assert again.reserve == force.reserve and bool(np.all(restart.aux[2]))
     nxt = jax.jit(lambda s: cluster_rollout(s, DT, scheme, again, n_steps=1)[0])(
         restart
     )

@@ -1503,7 +1503,14 @@ def run_segments(
             needs = np.asarray(st.aux[3]).tolist()
         except Exception:  # pragma: no cover - a foreign aux layout
             needs = None
-        return f" (verdict (galaxy, targets) {verdict(st.aux)}, target needs {needs})"
+        try:
+            parts = np.asarray(st.aux[2]).tolist()
+        except Exception:  # pragma: no cover - a foreign aux layout
+            parts = None
+        return (
+            f" (verdict (galaxy, targets) {verdict(st.aux)}, target parts {parts},"
+            f" target needs {needs})"
+        )
 
     for k in range(int(segments)):
         prog = programs(slow)

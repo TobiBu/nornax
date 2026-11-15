@@ -589,12 +589,13 @@ def test_fused_clusters_force_orchestration_on_a_stub():
     np.testing.assert_allclose(np.asarray(a_g), -np.asarray(xg) + 0.25)
     np.testing.assert_allclose(np.asarray(a_c), -0.5 * np.asarray(xc))
     assert a_c.shape == xc.shape
-    _, _, ok, needs = aux
-    assert bool(ok) and np.asarray(needs).tolist() == [[3, 2], [1, 5], [0, 0]]
+    _, _, ok, needs, star_tree = aux
+    assert bool(np.all(ok)) and star_tree is None
+    assert np.asarray(needs).tolist() == [[3, 2], [1, 5], [0, 0]]
     # no force scale: admit is the identity; with one it seeds |a| at the rows
     assert force.admit(aux, jnp.zeros(4, jnp.int32), jnp.ones((4, 3))) is aux
     seeded = force.admit(
-        ((jnp.zeros(6), None, None), None, ok, needs),
+        ((jnp.zeros(6), None, None), None, ok, needs, None),
         jnp.asarray([2, 6, 6, 4], jnp.int32),
         jnp.asarray([[3.0, 4.0, 0.0], [1, 1, 1], [1, 1, 1], [0.0, 0.0, 2.0]]),
     )
