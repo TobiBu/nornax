@@ -563,7 +563,7 @@ GPU, leaf 64; `hh2b/runs/lane_check_gpu*.log`):
 
 | kernel (lane and direct sum) | `dehnen_error` 1e-4 | θ 0.6 | θ 0.3 |
 |---|---|---|---|
-| Plummer | 2.4e-3 (6.5e-3 beyond r = 1, for fp32 and fp64 alike) | 2.4e-3 (θ 0.4) | 2.3e-3 |
+| Plummer | 2.4e-3 (6.5e-3 beyond r = 1, for fp32 and fp64 alike) | 2.6e-3 | 2.3e-3 |
 | ferrers3 | 7.1e-5 | 2.0e-4 | 2.5e-6 |
 
 A Plummer-softened direct sum is therefore not the Hamiltonian the lane integrates. A first gate-2 comparison made
