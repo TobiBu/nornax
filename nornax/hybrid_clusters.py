@@ -1415,10 +1415,11 @@ def run_segments(
     """Segments of :func:`cluster_rollout` with membership checks at their edges.
 
     At each edge (after every segment): with a ``policy``, the stripping
-    candidates are found (one jitted pass); if the reserve cannot hold them, it
-    is re-planned first (``slow.with_reserve(state, R_new)``, which returns the
-    new slow force and the state grown to ``R_new`` rows, :func:`grow_reserve`);
-    then the stars are transferred, the ledger takes the jump and the forces are
+    candidates are found (one jitted pass); if the reserve cannot hold them, the
+    state grows to ``R_new`` rows (``slow.grow_state``) and the slow force is
+    re-planned right after the transfer (``slow.replanned``), at the state the
+    next steps start from (a force without them: ``slow.with_reserve(state,
+    R_new)`` before the transfer); the stars are transferred, the ledger takes the jump and the forces are
     re-evaluated (:meth:`ClusterHybridHermite.refresh`). A slow force with a
     verdict (``slow_ok``/``replanned``: the fused lane's static capacities) that
     fails is re-planned and the segment run again from its start. Every program
@@ -1515,18 +1516,28 @@ def run_segments(
             row["dissolved"] = np.asarray(radii["dissolved"])
             if n_take:
                 free = int(state.galaxy_masses.shape[0]) - int(state.n_live)
+                if measure_jumps:
+                    e_before = slow.energy(state, scheme)
+                pending = False
                 if n_take > free:
                     R_old = int(state.reserve)
                     R_new = max(
                         int(np.ceil(float(policy.grow) * max(R_old, 1))),
                         R_old + n_take - free,
                     )
-                    slow, state = slow.with_reserve(state, R_new)
+                    if hasattr(slow, "grow_state") and hasattr(slow, "replanned"):
+                        # grow now, re-plan once AFTER the transfer: the plan
+                        # then holds the new stars (one prepare, not two)
+                        state = slow.grow_state(state, R_new)
+                        pending = True
+                    else:
+                        slow, state = slow.with_reserve(state, R_new)
+                        prog = programs(slow)
                     row["replanned"] = (R_old, R_new)
-                    prog = programs(slow)
-                if measure_jumps:
-                    e_before = slow.energy(state, scheme)
                 state, jump, _ = prog.transfer(state, take, dwell)
+                if pending:
+                    slow, state = slow.replanned(state)
+                    prog = programs(slow)
                 state = prog.refresh(state)
                 if not fits(slow, state):
                     # the new rows outgrew a plan at the refresh: re-plan, refresh

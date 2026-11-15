@@ -1065,16 +1065,8 @@ class FusedClustersForce:
         tuple[FusedClustersForce, Any]
             The new force and the grown state (its ``aux`` keeps the verdict).
         """
-        from nornax.hybrid_clusters import grow_reserve
-
-        grown = grow_reserve(state, int(reserve))
-        aux_g, fb_s, ok, needs = state.aux
-        add = int(reserve) - int(self.reserve)
-        if aux_g is not None and aux_g[0] is not None:
-            f = jnp.asarray(aux_g[0])
-            aux_g = (jnp.concatenate([f, jnp.zeros((add,), f.dtype)]),) + tuple(
-                aux_g[1:]
-            )
+        grown = self.grow_state(state, int(reserve))
+        aux_g, fb_s, ok, needs = grown.aux
         s = dict(self.setup)
         force, _ = FusedClustersForce.prepare(
             s.pop("galaxy_solver"),
@@ -1105,8 +1097,39 @@ class FusedClustersForce:
         """
         return all(self.verdict(aux))
 
+    def grow_state(self, state: Any, reserve: int) -> Any:
+        """The state grown to ``reserve`` free rows, its galaxy f_b padded (no re-plan).
+
+        :func:`~nornax.hybrid_clusters.run_segments` grows the state, transfers,
+        and only then re-plans (:meth:`replanned`) at the state the next steps
+        start from: one prepare that already holds the new stars.
+
+        Parameters
+        ----------
+        state : Any
+            A :class:`~nornax.hybrid_clusters.ClusterHybridState`.
+        reserve : int
+            The new ``R``.
+
+        Returns
+        -------
+        Any
+            The grown state (``aux`` padded; the force is stale until re-planned).
+        """
+        from nornax.hybrid_clusters import grow_reserve
+
+        add = int(reserve) - int(state.reserve)
+        grown = grow_reserve(state, int(reserve))
+        aux_g, fb_s, ok, needs = state.aux
+        if add and aux_g is not None and aux_g[0] is not None:
+            f = jnp.asarray(aux_g[0])
+            aux_g = (jnp.concatenate([f, jnp.zeros((add,), f.dtype)]),) + tuple(
+                aux_g[1:]
+            )
+        return grown._replace(aux=(aux_g, fb_s, ok, needs))
+
     def replanned(self, state: Any) -> tuple["FusedClustersForce", Any]:
-        """Re-plan at the state (same reserve) with the verdict reset: the retry.
+        """Re-plan at the state (its own reserve) with the verdict reset: the retry.
 
         Parameters
         ----------
@@ -1118,7 +1141,7 @@ class FusedClustersForce:
         tuple[FusedClustersForce, Any]
             The new force and the state with a fresh verdict in its ``aux``.
         """
-        force, st = self.with_reserve(state, int(self.reserve))
+        force, st = self.with_reserve(state, int(state.reserve))
         aux_g, fb_s, _, _ = st.aux
         if aux_g is not None:
             aux_g = (aux_g[0], None, None)
