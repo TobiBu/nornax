@@ -1485,6 +1485,16 @@ def run_segments(
         ok = getattr(sl, "slow_ok", None)
         return True if ok is None else bool(ok(st.aux))
 
+    def why(sl: Any, st: Any) -> str:
+        verdict = getattr(sl, "verdict", None)
+        if verdict is None:
+            return ""
+        try:
+            needs = np.asarray(st.aux[3]).tolist()
+        except Exception:  # pragma: no cover - a foreign aux layout
+            needs = None
+        return f" (verdict (galaxy, targets) {verdict(st.aux)}, target needs {needs})"
+
     for k in range(int(segments)):
         prog = programs(slow)
         seg_start = state
@@ -1498,7 +1508,7 @@ def run_segments(
             if retries >= int(max_retries):
                 raise RuntimeError(
                     f"segment {k + 1}: the slow force's verdict failed after "
-                    f"{retries} re-plans"
+                    f"{retries} re-plans{why(slow, state)}"
                 )
             slow, seg_start = slow.replanned(seg_start)
             prog = programs(slow)
@@ -1541,6 +1551,7 @@ def run_segments(
                 state = prog.refresh(state)
                 if not fits(slow, state):
                     # the new rows outgrew a plan at the refresh: re-plan, refresh
+                    row["refresh_verdict"] = why(slow, state)
                     slow, state = slow.replanned(state)
                     prog = programs(slow)
                     state = prog.refresh(state)
@@ -1548,7 +1559,7 @@ def run_segments(
                     if not fits(slow, state):
                         raise RuntimeError(
                             f"edge {k + 1}: the verdict failed after the transfer's "
-                            "re-plan"
+                            f"re-plan{why(slow, state)}"
                         )
                 row["jump"] = float(jump)
                 if measure_jumps:
