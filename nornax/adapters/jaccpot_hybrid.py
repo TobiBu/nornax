@@ -721,7 +721,9 @@ class FusedClustersForce:
       ``docs/hybrid_hermite.md`` section 8); ``"direct"`` the pairs between
       stars of different clusters (``O((K M)^2)``); ``"none"``.
 
-    ``aux = (galaxy_aux, star_f_b, ok, needs)`` as :class:`FusedHybridForce`'s.
+    ``aux = (galaxy_aux, star_f_b, ok, needs)`` as :class:`FusedHybridForce`'s, with
+    ``needs`` per target plan (``[3, 2]``: the stars', the back-reaction's, the
+    coupling's ``(far, near)``), which :meth:`replanned` grows each plan to.
 
     Attributes
     ----------
@@ -1080,7 +1082,7 @@ class FusedClustersForce:
             seed_g = galaxy_aux
         else:
             seed_g = None if f_b_g is None else (f_b_g, None, None)
-        return force, (seed_g, f_b_s, jnp.asarray(True), jnp.zeros((2,), jnp.int32))
+        return force, (seed_g, f_b_s, jnp.asarray(True), jnp.zeros((3, 2), jnp.int32))
 
     def with_reserve(
         self, state: Any, reserve: int
@@ -1167,13 +1169,24 @@ class FusedClustersForce:
             )
         return grown._replace(aux=(aux_g, fb_s, ok, needs))
 
-    def replanned(self, state: Any) -> tuple["FusedClustersForce", Any]:
+    def replanned(
+        self, state: Any, failed: Any = None
+    ) -> tuple["FusedClustersForce", Any]:
         """Re-plan at the state (its own reserve) with the verdict reset: the retry.
+
+        With ``failed`` (the state a failed segment ENDED in), the plans grow to
+        what it needed, as the runner's segment retry does: each target plan to
+        its own needs (``aux[3]``) times the headroom, and, if the galaxy's
+        verdict failed, the galaxy provider's caps through jaccpot's
+        ``provider.replanned(needs, ...)``. Re-planning only at the segment's
+        start would size them for the start again, and fail again.
 
         Parameters
         ----------
         state : Any
             Where to re-plan (a segment's start, or after a transfer).
+        failed : Any
+            The failed segment's end state, or ``None``.
 
         Returns
         -------
@@ -1181,6 +1194,8 @@ class FusedClustersForce:
             The new force and the state with a fresh verdict in its ``aux``.
         """
         force, st = self.with_reserve(state, int(state.reserve))
+        if failed is not None:
+            force = force._grown_from(failed.aux, st)
         aux_g, fb_s, _, needs = st.aux
 
         def cleared(a: Any) -> Any:
@@ -1192,6 +1207,49 @@ class FusedClustersForce:
         return force, st._replace(
             aux=(aux_g, fb_s, jnp.asarray(True), jnp.zeros_like(jnp.asarray(needs)))
         )
+
+    def _grown_from(self, aux: Any, state: Any) -> "FusedClustersForce":
+        """The plans (and galaxy caps) grown to cover a failed segment's needs (eager)."""
+        headroom = float((self.setup or {}).get("headroom", 1.5))
+        needs = np.asarray(aux[3]).reshape(3, 2)
+        names = ("stars_plan", "galaxy_plan", "coupling_plan")
+        kw = {}
+        for row, name in zip(needs, names):
+            plan = getattr(self, name)
+            if plan is not None and int(np.max(row)) > 0:
+                kw[name] = plan.grown(row, headroom)
+        out = dataclasses.replace(self, **kw) if kw else self
+        aux_g = aux[0]
+        if (
+            self.reserve
+            and aux_g is not None
+            and aux_g[1] is not None
+            and not self.verdict(aux)[0]
+        ):
+            out = out._galaxy_caps_grown(np.asarray(aux_g[2]), state)
+        return out
+
+    def _galaxy_caps_grown(self, needs_g: Any, state: Any) -> "FusedClustersForce":
+        """The galaxy provider re-planned from its walk/tree needs (jaccpot's retry)."""
+        from jaccpot.escapers import eager_split_inputs
+        from jaccpot.runtime.capacity_plan import eager_live_rows
+
+        gal = self.galaxy
+        rows = int(state.galaxy_masses.shape[0])
+        x_plan, m_plan = _planning_rows(
+            state.galaxy_positions,
+            state.galaxy_masses,
+            int(state.n_live),
+            state.clusters.positions,
+            state.clusters.masses,
+        )
+        cubic = bool(getattr(gal.engine, "_tree_cubic_bounds", False))
+        m_tree, box = eager_split_inputs(x_plan, m_plan, rows, cubic=cubic)
+        with eager_live_rows(rows):
+            out = gal.replanned(needs_g, x_plan, m_tree, caps_only=True, bounds=box)
+        if out is None:
+            return self
+        return dataclasses.replace(self, galaxy=out[0])
 
     # ---------------------------------------------------------------- traced
     def _galaxy_with_targets(
@@ -1319,7 +1377,7 @@ class FusedClustersForce:
             The accelerations and the next ``aux``.
         """
         aux_g, fb_s, ok, needs = (
-            (None, None, jnp.asarray(True), jnp.zeros((2,), jnp.int32))
+            (None, None, jnp.asarray(True), jnp.zeros((3, 2), jnp.int32))
             if aux is None
             else aux
         )
@@ -1367,7 +1425,7 @@ class FusedClustersForce:
                 xg, mg, n_live, xs, aux_g, fb_s
             )
             ok = ok & field.ok
-            needs = jnp.maximum(needs, field.needs)
+            needs = needs.at[0].max(jnp.asarray(field.needs, jnp.int32))
             fb_s = field.force_scale
             ctopo = self.clusters.rebuild(xs, ms)
             back = self.clusters.target_field(
@@ -1377,14 +1435,14 @@ class FusedClustersForce:
                 softening=self.back_softening,
             )
             ok = ok & back.ok & self.clusters.capacity_ok(ctopo)
-            needs = jnp.maximum(needs, back.needs)
+            needs = needs.at[1].max(jnp.asarray(back.needs, jnp.int32))
             a_g = jnp.asarray(acc, dtype) + jnp.asarray(back.acc, dtype)
             a_c = jnp.asarray(field.acc, dtype)
         if self.coupling != "none":
             a_cc, _, ok_cc, needs_cc = self._coupling_field(xs, ms, ctopo)
             a_c = a_c + a_cc
             ok = ok & ok_cc
-            needs = jnp.maximum(needs, needs_cc)
+            needs = needs.at[2].max(jnp.asarray(needs_cc, jnp.int32))
         a_c = jnp.asarray(a_c, jnp.asarray(xc).dtype).reshape(K, M, 3)
         return a_g, a_c, (aux_g, fb_s, ok, needs)
 
@@ -1395,7 +1453,7 @@ class FusedClustersForce:
             n_live,
             None,
             None,
-            aux=(aux_g, None, jnp.asarray(True), jnp.zeros((2,), jnp.int32)),
+            aux=(aux_g, None, jnp.asarray(True), jnp.zeros((3, 2), jnp.int32)),
         )
         return out[0], out[2][0]
 

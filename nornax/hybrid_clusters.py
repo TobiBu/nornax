@@ -1378,6 +1378,15 @@ def transfer(
     return new, jump, n_taken
 
 
+def _replan(slow: Any, state: Any, failed: Any) -> tuple[Any, Any]:
+    """``slow.replanned(state, failed=failed)``, or without ``failed`` if it takes none."""
+    import inspect
+
+    if "failed" in inspect.signature(slow.replanned).parameters:
+        return slow.replanned(state, failed=failed)
+    return slow.replanned(state)
+
+
 class _Programs:
     """The jitted programs of one (scheme, slow, dt, steps) combination."""
 
@@ -1452,8 +1461,9 @@ def run_segments(
         ``on_edge(edge_index, state, row)`` after each edge (eager).
     max_retries : int
         Re-plans per segment when the slow force's verdict fails
-        (``slow.slow_ok(aux)`` False; then ``slow.replanned(state)`` and the
-        segment runs again from its start, as the runner's segment retry).
+        (``slow.slow_ok(aux)`` False; then ``slow.replanned(start, failed=end)``
+        grows the plans to what the segment needed and it runs again from its
+        start, as the runner's segment retry).
 
     Raises
     ------
@@ -1510,7 +1520,7 @@ def run_segments(
                     f"segment {k + 1}: the slow force's verdict failed after "
                     f"{retries} re-plans{why(slow, state)}"
                 )
-            slow, seg_start = slow.replanned(seg_start)
+            slow, seg_start = _replan(slow, seg_start, state)
             prog = programs(slow)
             state, rec = prog.segment(seg_start)
             retries += 1
@@ -1552,7 +1562,7 @@ def run_segments(
                 if not fits(slow, state):
                     # the new rows outgrew a plan at the refresh: re-plan, refresh
                     row["refresh_verdict"] = why(slow, state)
-                    slow, state = slow.replanned(state)
+                    slow, state = _replan(slow, state, state)
                     prog = programs(slow)
                     state = prog.refresh(state)
                     row["refresh_replanned"] = True
