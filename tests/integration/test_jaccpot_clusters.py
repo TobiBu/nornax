@@ -241,8 +241,17 @@ def _strip(reserve):
     return scheme, force, start, end, rows
 
 
-def test_stripping_on_the_fused_lane():
-    scheme, force, start, end, rows = _strip(reserve=64)
+@pytest.fixture(scope="module")
+def strip_runs():
+    """A run whose reserve (1 row) fills and re-plans, and one started with the end reserve."""
+    small = _strip(reserve=1)
+    grown = [r["replanned"] for r in small[4] if "replanned" in r]
+    big = _strip(reserve=grown[-1][1]) if grown else None
+    return small, big, grown
+
+
+def test_stripping_on_the_fused_lane(strip_runs):
+    scheme, force, start, end, rows = strip_runs[1]
     assert force.verdict(end.aux) == (True, True)
     n_strip = int(end.n_live) - N
     assert n_strip > 0
@@ -258,13 +267,12 @@ def test_stripping_on_the_fused_lane():
     assert abs(e1["E_ledgered"] - e0["E"]) < 1e-4 * abs(e0["E"])
 
 
-def test_a_full_reserve_replans_to_the_larger_one():
+def test_a_full_reserve_replans_to_the_larger_one(strip_runs):
     """Bitwise here; before the re-plan the two runs' programs differ in rows."""
-    _, small_force, _, small, rows_s = _strip(reserve=1)
-    grown = [r["replanned"] for r in rows_s if "replanned" in r]
+    (_, small_force, _, small, rows_s), big_run, grown = strip_runs
     assert grown and grown[0][0] == 1
     big_r = grown[-1][1]
-    _, _, _, big, rows_b = _strip(reserve=big_r)
+    _, _, _, big, rows_b = big_run
     assert not any("replanned" in r for r in rows_b)
     assert small_force.reserve == big_r
     for name in ("galaxy_positions", "galaxy_velocities", "n_live", "galaxy_star_id"):
