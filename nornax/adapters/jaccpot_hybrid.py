@@ -1181,11 +1181,16 @@ class FusedClustersForce:
             The new force and the state with a fresh verdict in its ``aux``.
         """
         force, st = self.with_reserve(state, int(state.reserve))
-        aux_g, fb_s, _, _ = st.aux
+        aux_g, fb_s, _, needs = st.aux
+
+        def cleared(a: Any) -> Any:
+            # the same pytree (a scan's carry), the verdict reset
+            return None if a is None else jnp.zeros_like(a)
+
         if aux_g is not None:
-            aux_g = (aux_g[0], None, None)
+            aux_g = (aux_g[0], cleared(aux_g[1]), cleared(aux_g[2]))
         return force, st._replace(
-            aux=(aux_g, fb_s, jnp.asarray(True), jnp.zeros((2,), jnp.int32))
+            aux=(aux_g, fb_s, jnp.asarray(True), jnp.zeros_like(jnp.asarray(needs)))
         )
 
     # ---------------------------------------------------------------- traced

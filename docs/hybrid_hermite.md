@@ -532,7 +532,48 @@ the `galaxy` preset, whose criterion is `dehnen_error`: the module constant `HYB
 
 ## 11. Gates (session 2)
 
-GATES_PLACEHOLDER
+Numbers from `mn-scratch/hh2b/` (scripts, runs, `REPORT.md`). "Bitwise" means equal on this host (EPYC 7452,
+AVX2), measured with `NORNAX_HYBRID_STRICT_BITWISE=1`. The tests compare DIFFERENT XLA programs within a few-ulp bound
+(`_assert_same`), because the CI's AVX-512 runners differ across programs by a few ulp; comparisons within ONE program
+(chained == once, stripping enabled with nobody stripped == disabled) assert bitwise.
+
+**1. Limits.**
+
+| limit | result |
+|---|---|
+| `K = 1` == session 1's `HybridHermite` (direct slow force, Hermite 4 and 6) | bitwise (a different program: a vmapped `[1, M]` batch with masks) |
+| `K = 1` on the fused lane == session 1's `FusedHybridForce` run (`dehnen` and `dehnen_error`, CPU route) | bitwise |
+| `K = 4` uncoupled clusters (no coupling, no back-reaction) == 4 single-cluster runs | 3 of 4 bitwise, one 4 ulp: the batch of 4 and the batch of 1 are different programs (round-off) |
+| stripping enabled, nobody stripped == stripping disabled (same reserve) | bitwise (the same programs) |
+| an unused reserve (`R` = 16, 64) == no reserve, on the fused lane | bitwise, both criteria (the galaxy's live-row cut; the free rows on the last live Morton point) |
+| padding (empty slots, free rows) | the filled slots and live rows to `1e-13`; empty slots and free rows exactly at rest |
+
+**4. Capacity.** A run whose reserve (1 row on the fused lane, 2 rows on the direct force) fills and re-plans equals a
+run started with the final reserve, **bitwise** (state, ids, `n_live`, ledger, transfers per edge), on the direct
+reference and on the fused lane (`dehnen`, CPU route). Two conditions were needed:
+
+- the back-reaction's target groups must not see the free rows (`_back_targets`, section 9);
+- the free rows sit at a fixed place (the origin), not at a copy of a moving row.
+
+**3. Many clusters** (CPU route, Hernquist galaxy 2e4, eps_g 0.02, geometric galaxy criterion θ 0.6 (`dehnen_error`
+runs its Pallas kernels in interpret mode on CPU), p6, leaf 64; `K` Plummer clusters of 32 stars, M_c 1e-5,
+r_c 3e-3, on random orbits at r = 0.3-3; 60 slow steps of 2e-3; `mn-scratch/hh2b/runs/g3_K*.json`):
+
+GATE3_TABLE
+
+**5. GPU functional.** GATE5_TEXT
+
+**2. Stripping accuracy.** GATE2_TEXT
+
+**6. CI.**
+
+- `lint-and-test` 3.11 / 3.12 / 3.13: the coverage floor holds without jaccpot (81.4 % locally, with stub tests of
+  `FusedClustersForce`'s orchestration).
+- `solver-tests` is unchanged.
+- New job `solver-tests-hybrid` (the same pins: jaccpot main 122b2228, which has everything used): session 1's
+  `test_jaccpot_hybrid.py` plus `test_jaccpot_clusters.py` (6 tests). It took 21 min on CI; with these tests the old
+  job would have come near its 90-minute cap, so it was split rather than raised.
+- No jaccpot change was needed.
 
 ## 12. Session 3+ plan (not built)
 
