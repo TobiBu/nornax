@@ -555,8 +555,25 @@ reference and on the fused lane (`dehnen`, CPU route). Two conditions were neede
 - the back-reaction's target groups must not see the free rows (`_back_targets`, section 9);
 - the free rows sit at a fixed place (the origin), not at a copy of a moving row.
 
-**3. Many clusters** (CPU route, Hernquist galaxy 2e4, eps_g 0.02, geometric galaxy criterion θ 0.6 (`dehnen_error`
-runs its Pallas kernels in interpret mode on CPU), p6, leaf 64; `K` Plummer clusters of 32 stars, M_c 1e-5,
+**A lesson for every comparison: the reference must use the lane's kernel.** The fused lane's far field is
+Newtonian. With a compact kernel (ferrers3, the galaxy preset's default) that is exact beyond the kernel's support,
+and the walk's separation floor keeps every pair inside it in the near field. Plummer has no compact support, so the
+nodes a few softening lengths away are evaluated unsoftened. Measured on the gate-2 galaxy (Hernquist 2e4, eps 0.02,
+GPU, leaf 64; `hh2b/runs/lane_check_gpu*.log`):
+
+| kernel (lane and direct sum) | `dehnen_error` 1e-4 | θ 0.6 | θ 0.3 |
+|---|---|---|---|
+| Plummer | 2.4e-3 (6.5e-3 beyond r = 1, for fp32 and fp64 alike) | 2.4e-3 (θ 0.4) | 2.3e-3 |
+| ferrers3 | 7.1e-5 | 2.0e-4 | 2.5e-6 |
+
+A Plummer-softened direct sum is therefore not the Hamiltonian the lane integrates. A first gate-2 comparison made
+that way showed the cluster dissolving visibly faster under the FMM. It was the reference, not the hybrid; the
+gate-2 numbers below use ferrers3 on both sides (`DirectClustersForce(kernel=)`, added for this). Gate 3's coupling
+errors were measured with Plummer, so they include this mismatch: at most `(eps/d)^2 ~ 4e-4` at the clusters'
+separations.
+
+**3. Many clusters** (CPU route, Hernquist galaxy 2e4, eps_g 0.02 Plummer, geometric galaxy criterion θ 0.6
+(`dehnen_error` runs its Pallas kernels in interpret mode on CPU), p6, leaf 64; `K` Plummer clusters of 32 stars, M_c 1e-5,
 r_c 3e-3, on random orbits at r = 0.3-3; 60 slow steps of 2e-3; `mn-scratch/hh2b/runs/g3_K*.json`):
 
 | K | cluster-cluster field / tidal | `"fmm"` vs `"direct"` coupling, rms (max) / cluster-cluster | / tidal | its internal (COM-free) part / tidal | \|ΔE\|/\|E\| after 60 steps, fmm / direct | \|ΔP\| | \|ΔL\|/\|L\| | stripped | verdicts |
