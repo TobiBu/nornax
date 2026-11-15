@@ -620,3 +620,50 @@ def test_fused_clusters_force_refuses_bad_configurations():
         FusedClustersForce.prepare(
             None, None, None, None, None, None, leaf_size=1, max_order=1, cross="x"
         )
+
+
+class _FlakyVerdict(DirectClustersForce):
+    """A slow force whose verdict fails ``fails`` times: re-planned, then fine."""
+
+    def __init__(self, fails, **kw):
+        super().__init__(**kw)
+        object.__setattr__(self, "_fails", [int(fails)])
+        object.__setattr__(self, "_replans", [0])
+
+    def slow_ok(self, aux):
+        if self._fails[0] > 0:
+            self._fails[0] -= 1
+            return False
+        return True
+
+    def replanned(self, state):
+        self._replans[0] += 1
+        return self, state
+
+
+def test_a_failed_verdict_reruns_the_segment_from_its_start():
+    xg, vg, mg, xc, vc, mc = _system(K=2)
+    scheme = _scheme()
+    plain = DirectClustersForce(softening=EPS)
+    start = scheme.initial_state(plain, galaxy=(xg, vg, mg), clusters=(xc, vc, mc))
+    want, _, _ = run_segments(
+        scheme, plain, start, 0.02, segments=2, steps_per_segment=2
+    )
+    flaky = _FlakyVerdict(1, softening=EPS)
+    got, _, rows = run_segments(
+        scheme, flaky, start, 0.02, segments=2, steps_per_segment=2
+    )
+    assert rows[0]["retries"] == 1 and "retries" not in rows[1]
+    assert flaky._replans[0] == 1
+    for a, b in zip(jax.tree_util.tree_leaves(got), jax.tree_util.tree_leaves(want)):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    with pytest.raises(RuntimeError, match="re-plans"):
+        run_segments(
+            scheme,
+            _FlakyVerdict(5, softening=EPS),
+            start,
+            0.02,
+            segments=1,
+            steps_per_segment=1,
+            max_retries=2,
+        )
