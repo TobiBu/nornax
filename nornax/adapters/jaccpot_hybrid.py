@@ -649,6 +649,35 @@ def _back_targets(xg: Any, n_live: Any, provider: Any) -> Any:
     )
 
 
+def _summed(a: Any, b: Any) -> Any:
+    """Plan ``a`` with ``b``'s capacities added (the capacities are totals)."""
+    return dataclasses.replace(
+        a,
+        far_capacity=int(a.far_capacity) + int(b.far_capacity),
+        near_capacity=int(a.near_capacity) + int(b.near_capacity),
+    )
+
+
+def _planning_rows(xg: Any, mg: Any, n_live: int, xc: Any, mc: Any) -> tuple[Any, Any]:
+    """The galaxy rows with the free ones parked among the clusters, as stars.
+
+    Positions from :func:`~nornax.hybrid_clusters.park_rows` (the filled star
+    slots, cycled) and the mean star mass: the layout a full reserve will have,
+    for sizing the galaxy provider's caps and the target plans.
+    """
+    from nornax.hybrid_clusters import park_rows
+
+    rows = int(xg.shape[0])
+    n_free = rows - int(n_live)
+    if n_free == 0:
+        return xg, mg
+    ms = jnp.asarray(mc, mg.dtype).reshape(-1)
+    m_star = jnp.sum(ms) / jnp.maximum(jnp.sum(ms > 0), 1)
+    x = jnp.concatenate([xg[: int(n_live)], park_rows(xc, mc, n_free, xg[0])])
+    m = jnp.concatenate([mg[: int(n_live)], jnp.full((n_free,), m_star, mg.dtype)])
+    return x, m
+
+
 def _fold(bits: Any, needs: Any, bits_in: Any, needs_in: Any) -> tuple[Any, Any]:
     """``FusedForceProvider.step``'s verdict fold (bits OR-ed, needs max-ed while on track)."""
     from jaccpot.runtime.fused_topology import overflow_ok
@@ -871,7 +900,7 @@ class FusedClustersForce:
         from jaccpot.escapers import eager_split_inputs
         from jaccpot.runtime.capacity_plan import eager_live_rows
 
-        from nornax.hybrid_clusters import pad_galaxy, park_rows
+        from nornax.hybrid_clusters import pad_galaxy
 
         xg = jnp.asarray(xg)
         mg = jnp.asarray(mg)
@@ -944,11 +973,16 @@ class FusedClustersForce:
                     galaxy_solver_engine(galaxy_solver), "_tree_cubic_bounds", False
                 )
             )
-            m_tree, box = eager_split_inputs(xg, mg, int(n_live), cubic=cubic)
-            with eager_live_rows(int(n_live)):
+            # the caps cover the reserve: sized over the live rows PLUS the free
+            # rows parked among the clusters (where stripped stars land), all
+            # live in the eager prepare; the traced rebuilds cut at n_live
+            n_free = rows - int(n_live)
+            x_plan, m_plan = _planning_rows(xg, mg, int(n_live), xc, mc)
+            m_tree, box = eager_split_inputs(x_plan, m_plan, rows, cubic=cubic)
+            with eager_live_rows(rows):
                 gal, _ = FusedForceProvider.prepare(
                     galaxy_solver,
-                    xg,
+                    x_plan,
                     m_tree,
                     leaf_size=int(leaf_size),
                     max_order=int(max_order),
@@ -957,12 +991,24 @@ class FusedClustersForce:
                 )
             if not gal.scale_carry:
                 f_b_g = None
-            plan_topo = jax.jit(lambda x, m, n, f: _live_topology(gal, x, m, n, f))(
-                xg, mg, jnp.asarray(int(n_live), jnp.int32), f_b_g
-            )
+            topo_of = jax.jit(lambda x, m, n, f: _live_topology(gal, x, m, n, f))
+            plan_topo = topo_of(xg, mg, jnp.asarray(int(n_live), jnp.int32), f_b_g)
+            f_plan = None
+            if f_b_g is not None:
+                f_live = jnp.asarray(f_b_g)[: int(n_live)]
+                f_plan = jnp.concatenate(
+                    [f_live, jnp.full((n_free,), jnp.median(f_live), f_live.dtype)]
+                )
+            plan_topo2 = topo_of(x_plan, m_plan, jnp.asarray(rows, jnp.int32), f_plan)
         plan_s = gal.plan_targets(
             plan_topo, pts, group_size=group_size, headroom=headroom
         )
+        if reserve:
+            extra_s = gal.plan_targets(
+                plan_topo2, pts, group_size=group_size, headroom=headroom
+            )
+            plan_s = _summed(plan_s, extra_s)
+            del plan_topo2
         f_b_s = None
         if gal.scale_carry:
             from jaccpot.runtime.target_points import bootstrap_target_force_scale
@@ -997,9 +1043,7 @@ class FusedClustersForce:
                     softening=back_eps,
                 )
                 if n_free:
-                    planning = jnp.concatenate(
-                        [xg[: int(n_live)], park_rows(xc, mc, n_free, xg[0])]
-                    )
+                    planning, _ = _planning_rows(xg, mg, int(n_live), xc, mc)
                     extra = clu.plan_targets(
                         ctopo,
                         planning,
@@ -1007,12 +1051,7 @@ class FusedClustersForce:
                         headroom=headroom,
                         softening=back_eps,
                     )
-                    plan_g = dataclasses.replace(
-                        plan_g,
-                        far_capacity=int(plan_g.far_capacity) + int(extra.far_capacity),
-                        near_capacity=int(plan_g.near_capacity)
-                        + int(extra.near_capacity),
-                    )
+                    plan_g = _summed(plan_g, extra)
             if coupling == "fmm":
                 plan_cc = clu.plan_targets(
                     ctopo,
