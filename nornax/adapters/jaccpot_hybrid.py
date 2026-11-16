@@ -256,12 +256,25 @@ class FusedHybridForce:
         if gal.scale_carry:
             _, f_b_g = gal.accelerations(topo, force_scale=True)
         xc_w = jnp.asarray(xc, jnp.asarray(xg).dtype)
-        plan_c = gal.plan_targets(topo, xc_w, group_size=group_size, headroom=headroom)
+        from jaccpot.runtime import target_points as tp
+
+        if hasattr(tp, "TargetSources"):
+            # jaccpot with HH2a's sources-based planning (#522): drop the eager
+            # topology first -- at 1e8 it left no room for the target program --
+            # and plan from (positions, masses, f_b), each round in its own rebuild
+            del topo
+            gal.engine.clear_prepared_state_cache()
+            topo = tp.TargetSources(jnp.asarray(xg), jnp.asarray(mg), f_b_g)
+            plan_c = tp.plan_target_points(
+                gal, topo, xc_w, group_size=group_size, headroom=headroom
+            )
+        else:
+            plan_c = gal.plan_targets(
+                topo, xc_w, group_size=group_size, headroom=headroom
+            )
         f_b_c = None
         if gal.scale_carry:
-            from jaccpot.runtime.target_points import bootstrap_target_force_scale
-
-            f_b_c, _ = bootstrap_target_force_scale(gal, topo, xc_w, plan=plan_c)
+            f_b_c, _ = tp.bootstrap_target_force_scale(gal, topo, xc_w, plan=plan_c)
         del topo
         clu = plan_g = None
         if cross == "fmm":
@@ -277,13 +290,27 @@ class FusedHybridForce:
                     "the cluster provider must use a geometric criterion (its "
                     "rebuild carries no force scale here)"
                 )
-            plan_g = clu.plan_targets(
-                ctopo,
-                jnp.asarray(xg),
-                group_size=group_size,
-                headroom=headroom,
-                softening=float(gal.engine.softening),
-            )
+            try:  # jaccpot with HH2a's back-reaction plan (#522)
+                from jaccpot.runtime.target_back_reaction import plan_back_reaction
+            except ImportError:
+                plan_back_reaction = None
+            if plan_back_reaction is not None:
+                plan_g = plan_back_reaction(
+                    clu,
+                    ctopo,
+                    jnp.asarray(xg),
+                    group_size=group_size,
+                    headroom=headroom,
+                    softening=float(gal.engine.softening),
+                )
+            else:
+                plan_g = clu.plan_targets(
+                    ctopo,
+                    jnp.asarray(xg),
+                    group_size=group_size,
+                    headroom=headroom,
+                    softening=float(gal.engine.softening),
+                )
             del ctopo
         gal.engine.clear_prepared_state_cache()
         force = cls(
