@@ -461,9 +461,19 @@ and an overflowing plan would truncate it. So each evaluation puts the free rows
 that curve (`_back_targets`): the box and every live group are as without them, and the last live group only gains
 copies of a point it holds. The plan is sized for that layout plus the free rows parked among the clusters (where
 stripped stars arrive, `park_rows`; the capacities are totals, so they add). This uses jaccpot's private
-`_morton_order` (with a replica if it moves: only the invariance, never correctness, depends on it). If a plan still
-overflows (a verdict fails), `run_segments` re-plans at the segment's start and runs it again (`slow.replanned`), as
-the runner's segment retry does; after a transfer it re-plans and refreshes.
+`_morton_order` (with a replica if it moves: only the invariance, never correctness, depends on it). If a capacity
+still overflows (a verdict fails), `run_segments` reruns the segment from its start with everything grown to what the
+failed segment needed, as the runner's segment retry does: `slow.replanned(start, failed=end)`. The verdict is kept
+per part (`ok[4]`: the field at the stars, the back-reaction, the star tree's capacities, the coupling; `needs[3, 2]`
+per target plan; the star tree's and the galaxy's own bits and needs). Each target plan grows to its own needs x
+headroom; the star provider and the galaxy provider grow through jaccpot's `provider.replanned(needs, ...)`. After a
+transfer the refresh does the same.
+
+The galaxy's caps and the stars' plan are sized for the reserve from the start: the caps-only prepare runs over the
+live rows plus the free rows parked among the clusters, so a stripping edge does not need a re-plan. A dissolving
+cluster's spreading stars can still outgrow the star tree's and the back-reaction's capacities; that is what the
+retry is for. **Every re-plan compiles a new program set**: minutes on a loaded host, and the bulk of gate 5's wall
+time (section 11). Session 3's runner should size these capacities with more headroom, from the needs history.
 
 **When a star leaves** (`StrippingPolicy`, checked at segment edges by `run_segments`):
 
