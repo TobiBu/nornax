@@ -609,7 +609,45 @@ r = 0.3-1.5 on circular orbits.
   `hh2b/STATUS.md`; they found the re-plan costs fixed in `0436129` and `93de0eb` and the retry fixed in `1fbe9e4`.
 - `hh2b/runs/g5_1e6_10x1e4.json`.
 
-**2. Stripping accuracy.** GATE2_TEXT
+**2. Stripping accuracy.** One cluster strips on an eccentric orbit, and the FMM hybrid is compared with the same scheme on direct sums.
+
+**Setup** (`hh2b/scripts/gate2.py`, `hh2b/runs/g2f3_*`):
+
+- Hernquist galaxy of 2e4 (a = 1, M = 1), eps_g 0.02, **ferrers3 on both sides**.
+- Plummer cluster of 1e3 stars, M_c 1e-6, r_c 3e-3, eps_c r_c/20, Hermite 4, n_sub 16. Its orbit runs from apocentre
+  0.6 to pericentre 0.24 (period about 3.8).
+- `StrippingPolicy()` (2 r_J, dwell 1) checked every 0.05, until t = 10 (2.6 orbits). The cluster dissolves
+  completely: half its stars are lost at the second pericentre.
+- FMM: `FusedClustersForce` with the `galaxy_solver()` default (`dehnen_error` 1e-4), leaf 64, p6, on a GPU.
+- Reference: `DirectClustersForce(kernel=ferrers3)`. The reserve starts at 64 rows and re-plans 4 times (to 1024).
+
+| comparison (dt 5e-3 unless stated) | max \|Δ bound stars\| (of 1000) | t lose 50 / 90 / 99 % | stream KS (azimuth / radius) | stream centroid Δ | matched stars Δ (median / p90) |
+|---|---|---|---|---|---|
+| floor: galaxy positions perturbed by 1e-7 | 0 | equal | 0.002 / 0.002 | 1.1e-6 | 2.3e-6 / 4.8e-6 |
+| dt 1e-2 vs 5e-3 (direct) | 10 | 3.30 / 5.00 / 6.30 vs 3.25 / 5.10 / 6.30 | 0.036 / 0.060 | 2.4e-3 | 4.5e-3 / 8.3e-3 |
+| **FMM vs direct** | **11** | **3.30 / 5.00 / 6.35 vs 3.25 / 5.10 / 6.30** | **0.017 / 0.015** | **6.7e-4** | **1.8e-3 / 7.5e-3** |
+
+The stream's median radius is 0.248 in both, with a 10-90 % range of 0.22-0.36. **Stated error:** the FMM changes
+the bound mass and the stream by no more than the slow step's own discretisation error (dt 5e-3 vs 1e-2).
+
+Conservation over the run (E includes the ledger):
+
+| run | max \|ΔE\|/\|E\| | \|ΔP\| | \|ΔL\|/\|L\| |
+|---|---|---|---|
+| direct dt 1e-2 | 2.21e-5 | 1.4e-17 | 1.3e-14 |
+| direct dt 5e-3 | 5.55e-6 (ratio 3.99: second order) | 2.0e-17 | 1.0e-14 |
+| FMM dt 5e-3 | 5.76e-6 | 1.1e-8 | 1.4e-5 |
+
+- The ledger's jumps are tiny here (light stars): `E` and `E - ledger` differ by about 4e-11.
+- On the direct force the ledger equals the measured jump exactly (unit test).
+
+Also measured, with the Plummer kernel on both sides (whose mismatch is described above):
+
+- the same scheme on direct sums at 1e5 + 1e4 (GPU): the cluster dissolves by t ≈ 12. Energy 1.2e-6, P and L to
+  round-off, 8 reserve re-plans;
+- 2e4 + 1e3: dt convergence and a chaos floor equivalent to the ferrers3 ones.
+
+The 1e5 + 1e4 FMM run was not repeated with ferrers3 (GPU time, see the report).
 
 **6. CI.**
 
