@@ -109,4 +109,39 @@ jobs:
           tests/integration/test_jaccpot_provider_shooting.py
           tests/integration/test_jaccpot_provider_rollout.py
           tests/integration/test_jaccpot_sharded.py
+
+  # The hybrid Hermite tests (sessions 1-2) in a job of their own: with them the
+  # solver-tests job above would run ~80 of its 90 minutes (2026-11-15; split, not raised).
+  solver-tests-hybrid:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
+      JACCPOT_REF: 122b2228fddd4227336d1cfdaaeb0c854b000737
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          # jaccpot requires Python >= 3.12.
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install nornax + jaccpot and yggdrax at the pinned commits
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" \
+            "yggdrax @ git+https://github.com/TobiBu/yggdrax.git@${YGGDRAX_REF}" \
+            "jaccpot @ git+https://github.com/TobiBu/jaccpot.git@${JACCPOT_REF}"
+          python -c "import jax, jaccpot, yggdrax; print('jax', jax.__version__)"
+
+      - name: The hybrid Hermite tests on jaccpot (CPU)
+        run: >-
+          pytest -o addopts="" --no-header -q
           tests/integration/test_jaccpot_hybrid.py
+          tests/integration/test_jaccpot_clusters.py

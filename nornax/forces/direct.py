@@ -23,11 +23,19 @@ class DirectSumGravity:
     memory at ``O(block_size x N)`` at the cost of a ``lax.map`` over blocks.
     The two paths compute the same quantities and agree to floating-point
     round-off.
+
+    ``skip_massless=True`` drops every pair with a massless end: a zero-mass row
+    is an EMPTY slot (a padded or stripped cluster star in
+    :mod:`nornax.hybrid_clusters`), which neither pulls nor is pulled, so it
+    stays exactly where it is (zero velocity, zero acceleration) and two empty
+    slots may coincide even without softening. Default ``False``: the program is
+    unchanged (a massless tracer is pulled as before).
     """
 
     G: float = 1.0
     softening: float = 0.0
     block_size: int | None = None
+    skip_massless: bool = False
 
     def derivatives(
         self,
@@ -69,6 +77,9 @@ class DirectSumGravity:
         soft2 = self.softening**2
         idx = jnp.arange(positions.shape[0])
         self_mask = idx[:, None] != idx[None, :]
+        if self.skip_massless:
+            filled = masses > 0
+            self_mask = self_mask & filled[:, None] & filled[None, :]
 
         dr = positions[None, :, :] - positions[:, None, :]
         dv = velocities[None, :, :] - velocities[:, None, :]
@@ -135,17 +146,26 @@ class DirectSumGravity:
         tr = to_blocks(pad_rows(positions, 1.0e30))
         tv = to_blocks(pad_rows(velocities, 0.0))
         tidx = to_blocks(pad_rows(idx_all, -1))
+        skip = bool(self.skip_massless)
+        filled = masses > 0
+        tfill = to_blocks(pad_rows(filled, False)) if skip else None
+
+        def pair_mask(idx_blk, fill_blk):
+            mask = idx_blk[:, None] != idx_all[None, :]
+            if skip:
+                mask = mask & fill_blk[:, None] & filled[None, :]
+            return mask
 
         def acc_jerk_block(carry):
-            r_blk, v_blk, idx_blk = carry
+            r_blk, v_blk, idx_blk, fill_blk = carry
             dr = positions[None, :, :] - r_blk[:, None, :]
             dv = velocities[None, :, :] - v_blk[:, None, :]
-            mask = idx_blk[:, None] != idx_all[None, :]
+            mask = pair_mask(idx_blk, fill_blk)
             return _acc_jerk(
                 dr, dv, mask, masses, soft2, self.G, need_jerk=max_order >= 2
             )
 
-        acc_blocks, jerk_blocks = jax.lax.map(acc_jerk_block, (tr, tv, tidx))
+        acc_blocks, jerk_blocks = jax.lax.map(acc_jerk_block, (tr, tv, tidx, tfill))
         acc = acc_blocks.reshape((padded, 3))[:n]
         if max_order == 1:
             return ForceDerivatives(acc=acc)
@@ -157,18 +177,18 @@ class DirectSumGravity:
         tj = to_blocks(pad_rows(jerk, 0.0))
 
         def snap_crackle_block(carry):
-            r_blk, v_blk, a_blk, j_blk, idx_blk = carry
+            r_blk, v_blk, a_blk, j_blk, idx_blk, fill_blk = carry
             dr = positions[None, :, :] - r_blk[:, None, :]
             dv = velocities[None, :, :] - v_blk[:, None, :]
             da = acc[None, :, :] - a_blk[:, None, :]
             dj = jerk[None, :, :] - j_blk[:, None, :] if max_order >= 4 else None
-            mask = idx_blk[:, None] != idx_all[None, :]
+            mask = pair_mask(idx_blk, fill_blk)
             return _snap_crackle(
                 dr, dv, da, dj, mask, masses, soft2, self.G, need_crackle=max_order >= 4
             )
 
         snap_blocks, crackle_blocks = jax.lax.map(
-            snap_crackle_block, (tr, tv, ta, tj, tidx)
+            snap_crackle_block, (tr, tv, ta, tj, tidx, tfill)
         )
         snap = snap_blocks.reshape((padded, 3))[:n]
         if max_order == 3:
