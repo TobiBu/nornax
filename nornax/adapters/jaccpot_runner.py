@@ -477,7 +477,7 @@ def _engines(slow: Any) -> list:
     galaxy = getattr(inner, "galaxy", None)
     if galaxy is None or not hasattr(galaxy, "engine"):
         return []
-    out = [galaxy.engine]
+    out = [galaxy.engine]  # pragma: no cover - jaccpot
     clusters = getattr(inner, "clusters", None)
     if clusters is not None and hasattr(clusters, "engine"):
         out.append(clusters.engine)
@@ -504,12 +504,17 @@ def _force_record(slow: Any, pin: Any) -> dict:
         "kind": type(inner).__name__,
         "escaper_coupled": isinstance(slow, EscaperCoupledForce),
     }
-    if not _engines(slow):
-        return rec
+    if _engines(slow):
+        rec.update(_fused_record(slow, inner, pin))
+    return rec
+
+
+def _fused_record(slow: Any, inner: Any, pin: Any) -> dict:  # pragma: no cover
+    """A ``FusedClustersForce``'s plan (jaccpot; ``test_jaccpot_runner.py``)."""
     from jaccpot.carried import pinned_trace_state, provider_record
 
     with pinned_trace_state(_engines(slow), pin):
-        rec.update(
+        return dict(
             reserve=int(inner.reserve),
             num_galaxy=int(inner.num_galaxy),
             shape=[int(v) for v in inner.shape],
@@ -524,7 +529,6 @@ def _force_record(slow: Any, pin: Any) -> dict:
                 ),
             },
         )
-    return rec
 
 
 # --------------------------------------------------------------------------
@@ -902,7 +906,9 @@ class ClustersRunnerScheme:
             state, jump, _ = prog.transfer(state, take, dwell)
         if coupled:
             d_wc = _coupling_energy_program(carry.slow.G)(state) - w_c_before
-            state = state._replace(ledger=state.ledger + d_wc.astype(state.ledger.dtype))
+            state = state._replace(
+                ledger=state.ledger + d_wc.astype(state.ledger.dtype)
+            )
             jump = jump + d_wc
             info["jump_coupling"] = float(d_wc)
         if pending:
@@ -1180,7 +1186,7 @@ class ClustersRunnerScheme:
         return carry, mismatches
 
 
-def _with_force_record(slow: Any, rec: dict, pin: Any) -> tuple:
+def _with_force_record(slow: Any, rec: dict, pin: Any) -> tuple:  # pragma: no cover
     """A re-prepared ``FusedClustersForce`` with the recorded plan: ``(force, mismatches)``."""
     from jaccpot.carried import (
         pinned_trace_state,

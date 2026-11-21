@@ -102,13 +102,13 @@ ESC = SimpleNamespace(r_escape=3.0, return_radius=1.5, every=1)
 
 def _rs(reserve=64, policy=POLICY, **kw):
     xg, vg, mg, xc, vc, mc = kw.pop("system", None) or _system()
+    kw.setdefault("slow_factory", _factory)
     return (
         ClustersRunnerScheme(
             _hermite(),
             (xc, vc, mc),
             reserve=reserve,
             policy=policy,
-            slow_factory=_factory,
             **kw,
         ),
         jnp.stack([xg, vg], 1),
@@ -336,3 +336,115 @@ def test_bad_configurations_are_refused():
         ClustersRunnerScheme(_hermite(), (None, None, None), reserve=-1)
     assert ClustersRunnerScheme.carried is True
     assert isinstance(RunnerCarry(None, None, None, None, 0), RunnerCarry)
+
+
+class _Planned(_Regrowing):
+    """The reference force with the fused lane's aux layout, a verdict and re-plans.
+
+    ``aux = (galaxy (f_b [rows], bits, needs), star f_b, ok [4], needs [3, 2],
+    star tree)``: what ``FusedClustersForce`` carries (the verdict per part); the
+    direct sum passes it through, so a test sets ``ok`` to fail a part.
+    """
+
+    def slow_ok(self, aux):
+        return bool(np.all(np.asarray(aux[2])))
+
+    def verdict(self, aux):
+        return True, bool(np.all(np.asarray(aux[2])))
+
+    def admit(self, aux, rows, star_acc):
+        f = jnp.asarray(aux[0][0])
+        f = f.at[rows].set(jnp.linalg.norm(star_acc, axis=-1), mode="drop")
+        return ((f,) + tuple(aux[0][1:]),) + tuple(aux[1:])
+
+    def grow_state(self, state, reserve):
+        add = int(reserve) - int(state.reserve)
+        grown = grow_reserve(state, reserve)
+        f = jnp.asarray(state.aux[0][0])
+        aux_g = (jnp.concatenate([f, jnp.zeros((add,), f.dtype)]),) + state.aux[0][1:]
+        return grown._replace(aux=(aux_g,) + tuple(state.aux[1:]))
+
+    def replanned(self, state, failed=None):
+        del failed
+        aux = state.aux
+        return _Planned(softening=EPS), state._replace(
+            aux=(aux[0], aux[1], jnp.ones((4,), bool), aux[3], aux[4])
+        )
+
+
+def _planned_factory(
+    rs, solver, settings, xg, mg, xc, mc, *, reserve, n_live=None, galaxy_aux=None
+):
+    rows = int(xg.shape[0]) + (0 if n_live is not None else int(reserve))
+    f_b = jnp.zeros((rows,), jnp.float64) if galaxy_aux is None else galaxy_aux[0]
+    aux = (
+        (f_b, None, None),
+        None,
+        jnp.ones((4,), bool),
+        jnp.zeros((3, 2), jnp.int32),
+        None,
+    )
+    return _Planned(softening=EPS), aux
+
+
+def test_a_full_reserve_grows_then_replans_once_and_verdicts_name_the_part():
+    rs, state, masses = _rs(reserve=1, slow_factory=_planned_factory)
+    carry, infos = _drive(rs, state, masses, 4)
+    grown = [r for i in infos for r in i["replans"] if r[0] == "reserve"]
+    assert grown and isinstance(carry.slow, _Planned)
+    assert carry.state.aux[0][0].shape == carry.state.galaxy_masses.shape
+    # a failed part is named, and the re-plan resets the verdict
+    bad = dataclasses.replace(
+        carry,
+        state=carry.state._replace(
+            aux=carry.state.aux[:2]
+            + (jnp.asarray([True, False, True, True]),)
+            + carry.state.aux[3:]
+        ),
+    )
+    assert rs.verdict(bad) == ["back-reaction"]
+    again = rs.replanned(carry, bad)
+    assert rs.verdict(again) == [] and again.pin is None
+
+
+def test_escapers_with_a_planned_force_permute_its_force_scale():
+    system = _system(fliers=3)
+    rs, state, masses = _rs(system=system, reserve=1, slow_factory=_planned_factory)
+    carry, infos = _drive(rs, state, masses, 4, escapers=ESC, energy=True)
+    st = carry.state
+    m = np.asarray(st.galaxy_masses)
+    n_live = int(st.n_live)
+    esc = (np.arange(m.shape[0]) >= n_live) & (m > 0)
+    assert esc.any() and isinstance(carry.slow, EscaperCoupledForce)
+    f_b = np.asarray(st.aux[0][0])
+    assert f_b.shape == m.shape and np.all(f_b[esc] > 0)  # |a_e| on the escapers
+    assert rs.verdict(carry) == []
+    # the grown reserve kept the escapers at the tail
+    n_esc = int(esc.sum())
+    assert np.all(m[m.shape[0] - n_esc :] > 0)
+    x, mm, _ = rs.galaxy(carry)
+    np.testing.assert_array_equal(np.asarray(mm), np.asarray(masses))
+    restored, mismatches = _roundtrip(rs, carry)
+    assert mismatches == []
+    fresh = dataclasses.replace(rs)
+    arrays, meta = rs.checkpoint(carry)
+    back, _ = fresh.restore(
+        {k: np.asarray(v) for k, v in arrays.items()},
+        json.loads(json.dumps(meta)),
+        solver=None,
+        settings=None,
+        dt=DT,
+        escapers=ESC,
+    )
+    assert fresh._escaper_policy is ESC and isinstance(back.slow, EscaperCoupledForce)
+    assert (
+        "scheme"
+        in fresh.restore(
+            {k: np.asarray(v) for k, v in arrays.items()},
+            dict(json.loads(json.dumps(meta)), scheme={"other": 1}),
+            solver=None,
+            settings=None,
+            dt=DT,
+            escapers=None,
+        )[1]
+    )
