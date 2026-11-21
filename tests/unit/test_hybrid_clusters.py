@@ -18,6 +18,7 @@ stars on orbits in it, float64, :class:`~nornax.hybrid_clusters.DirectClustersFo
 
 from __future__ import annotations
 
+import dataclasses
 import os
 
 import jax
@@ -703,3 +704,173 @@ def test_a_pluggable_reference_kernel():
     new, jump, _ = jax.jit(lambda s, t: transfer(s, t, s.dwell, scheme, c))(sc, take)
     de = c.energy(new, scheme)["E"] - c.energy(sc, scheme)["E"]
     assert abs(de - float(jump)) < 1e-12 * abs(c.energy(sc, scheme)["E"])
+
+
+# ---------------------------------------------------------------------------
+# The back-reaction planning (HH3a) on stub jaccpot modules
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class _Inner:
+    num_points: int
+    far_capacity: int = 10
+    near_capacity: int = 20
+    queue_capacity: int = 30
+
+    def grown(self, needs, headroom=1.5, stats=None):
+        return dataclasses.replace(self, far_capacity=self.far_capacity + 1)
+
+
+@dataclasses.dataclass(frozen=True)
+class _Back:
+    inner: _Inner
+    num_groups: int = 0
+
+    def grown(self, needs, headroom=1.5, stats=None):
+        return dataclasses.replace(self, inner=self.inner.grown(needs))
+
+
+def _stub_jaccpot(monkeypatch):
+    """Fake ``jaccpot`` modules recording the planning calls (no jaccpot needed)."""
+    import sys
+    import types
+    from typing import NamedTuple
+
+    calls = []
+
+    class TargetSources(NamedTuple):
+        positions: object
+        masses: object
+        force_scale: object
+        bounds: object = None
+        num_valid: object = None
+
+    class SourceGroups(NamedTuple):
+        positions: object
+        masses: object
+
+    def plan_target_points(prov, topo, pts, **kw):
+        calls.append(("walk", int(pts.shape[0]), kw.get("point_mask") is not None))
+        return _Inner(num_points=int(pts.shape[0]))
+
+    def plan_back_reaction(prov, topo, pts, **kw):
+        calls.append(
+            (
+                "auto",
+                int(pts.shape[0]),
+                kw.get("point_mask") is not None,
+                kw.get("groups") is not None,
+                kw.get("theta_mp"),
+            )
+        )
+        k = 0 if kw.get("groups") is None else int(kw["groups"].masses.shape[0])
+        return _Back(_Inner(num_points=32 * (1 + len(calls))), num_groups=k)
+
+    def live_bounds(x, n_live, *, cubic):
+        live = jnp.arange(x.shape[0]) < n_live
+        lo = jnp.min(jnp.where(live[:, None], x, jnp.inf), 0)
+        hi = jnp.max(jnp.where(live[:, None], x, -jnp.inf), 0)
+        return lo, hi
+
+    root = types.ModuleType("jaccpot")
+    runtime = types.ModuleType("jaccpot.runtime")
+    tpm = types.ModuleType("jaccpot.runtime.target_points")
+    brm = types.ModuleType("jaccpot.runtime.target_back_reaction")
+    esc = types.ModuleType("jaccpot.escapers")
+    tpm.TargetSources, tpm.plan_target_points = TargetSources, plan_target_points
+    brm.SourceGroups, brm.plan_back_reaction = SourceGroups, plan_back_reaction
+    esc.live_bounds = live_bounds
+    runtime.target_points, runtime.target_back_reaction = tpm, brm
+    root.runtime, root.escapers = runtime, esc
+    for name, mod in (
+        ("jaccpot", root),
+        ("jaccpot.runtime", runtime),
+        ("jaccpot.runtime.target_points", tpm),
+        ("jaccpot.runtime.target_back_reaction", brm),
+        ("jaccpot.escapers", esc),
+    ):
+        monkeypatch.setitem(sys.modules, name, mod)
+    return calls
+
+
+def test_back_reaction_planning_covers_the_reserve(monkeypatch):
+    """The live rows' plan (free rows masked) merged with the parked-rows plan;
+    grouped for K > 1, the root split for K = 1, the plain walk on request."""
+    from nornax.adapters import jaccpot_hybrid as jh
+
+    calls = _stub_jaccpot(monkeypatch)
+    xg, _, mg, xc, _, mc = _system(K=2)
+    n = int(xg.shape[0])
+    xg4 = jnp.concatenate([xg, jnp.zeros((4, 3), xg.dtype)])
+    mg4 = jnp.concatenate([mg, jnp.zeros(4, mg.dtype)])
+    kw = dict(group_size=32, headroom=1.5, softening=EPS)
+    plan = jh._plan_back(
+        None, None, xg4, mg4, n, xc, mc, back_reaction="auto",
+        back_options=dict(theta_mp=0.3), **kw,
+    )
+    assert calls == [("auto", n + 4, True, True, 0.3), ("auto", n + 4, False, True, 0.3)]
+    assert plan.num_groups == 2
+    assert plan.inner.num_points == 96 and plan.inner.far_capacity == 20
+    assert plan.inner.queue_capacity == 30
+    calls.clear()
+    one = jh._plan_back(
+        None, None, xg, mg, n, xc[:1], mc[:1], back_reaction="auto",
+        back_options=None, **kw,
+    )
+    assert calls == [("auto", n, False, False, None)] and one.num_groups == 0
+    calls.clear()
+    walk = jh._plan_back(
+        None, None, xg4, mg4, n, xc, mc, back_reaction="walk", back_options=None, **kw
+    )
+    assert calls == [("walk", n + 4, True), ("walk", n + 4, False)]
+    assert walk.far_capacity == 20 and walk.near_capacity == 40
+    src = jh._live_sources(xg4, mg4, n, None, False)
+    assert int(src.num_valid) == n
+    np.testing.assert_array_equal(np.asarray(src.masses[n:]), 0.0)
+    np.testing.assert_allclose(np.asarray(src.bounds[1]), np.max(np.asarray(xg), 0))
+    grp = jh._back_groups(xc, mc, jnp.float32)
+    assert grp.positions.dtype == jnp.float32 and grp.masses.shape == mc.shape
+
+
+def test_the_back_reaction_gets_the_mask_and_the_groups(monkeypatch):
+    """``point_mask`` only with a reserve, ``groups`` only for a grouped plan; a
+    failed back-reaction re-sizes its plan at the failed state and merges it."""
+    from nornax.adapters.jaccpot_hybrid import FusedClustersForce
+
+    calls = _stub_jaccpot(monkeypatch)
+    xg, vg, mg, xc, vc, mc = _system(K=2)
+    K, M = int(mc.shape[0]), int(mc.shape[1])
+    base = dict(
+        galaxy=_Stub(),
+        stars_plan="ps",
+        num_galaxy=int(xg.shape[0]),
+        shape=(K, M),
+        clusters=_Stub(),
+        setup=dict(group_size=32, headroom=1.5, back_options=None),
+    )
+    plain = FusedClustersForce(reserve=0, galaxy_plan="pg", **base)
+    assert plain._back_extra(xg, xg.shape[0], xc, mc) == {}
+    grouped = FusedClustersForce(
+        reserve=4, galaxy_plan=_Back(_Inner(64), num_groups=K), **base
+    )
+    extra = grouped._back_extra(xg, xg.shape[0] - 4, xc, mc)
+    assert set(extra) == {"point_mask", "groups"}
+    assert int(np.sum(np.asarray(extra["point_mask"]))) == xg.shape[0] - 4
+    st = _scheme().initial_state(
+        DirectClustersForce(softening=EPS),
+        galaxy=(xg, vg, mg),
+        clusters=(xc, vc, mc),
+        reserve=4,
+    )
+    failed_aux = (
+        None,
+        None,
+        jnp.asarray([True, False, True, True]),
+        jnp.asarray([[0, 0], [5, 7], [0, 0]], jnp.int32),
+        None,
+    )
+    out = grouped._grown_from(failed_aux, st, failed=st)
+    assert calls and calls[0][0] == "auto"
+    assert out.galaxy_plan.inner.num_points >= 64
+    assert out.galaxy_plan.inner.far_capacity > 11
