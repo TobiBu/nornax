@@ -200,6 +200,7 @@ class FusedHybridForce:
         cross: str = "fmm",
         group_size: int = 32,
         headroom: float = 1.5,
+        back_reaction: str = "auto",
     ) -> tuple["FusedHybridForce", Any]:
         """Prepare the providers and size the target plans at the start positions.
 
@@ -233,6 +234,13 @@ class FusedHybridForce:
             The target plans' group size (``plan_targets``).
         headroom : float
             The target plans' capacity headroom.
+        back_reaction : str
+            How the stars' field at the galaxy is planned (``cross="fmm"``):
+            ``"auto"`` (default) uses jaccpot's ``plan_back_reaction`` (#522: the
+            cluster's multipole beyond a few cluster radii, the target walk
+            inside; what fits 1e8 on one card) when the installed jaccpot has
+            it, else the plain target walk; ``"walk"`` always uses the plain
+            target walk, the planning :class:`FusedClustersForce` still uses.
 
         Returns
         -------
@@ -245,10 +253,14 @@ class FusedHybridForce:
         ------
         ValueError
             If the cluster provider's criterion carries a force scale
-            (``dehnen_error``).
+            (``dehnen_error``), or ``back_reaction`` is unknown.
         """
         from jaccpot import FusedForceProvider
 
+        if back_reaction not in ("auto", "walk"):
+            raise ValueError(
+                f"back_reaction must be 'auto' or 'walk', not {back_reaction!r}"
+            )
         gal, topo = FusedForceProvider.prepare(
             galaxy_solver, xg, mg, leaf_size=int(leaf_size), max_order=int(max_order)
         )
@@ -290,10 +302,14 @@ class FusedHybridForce:
                     "the cluster provider must use a geometric criterion (its "
                     "rebuild carries no force scale here)"
                 )
-            try:  # jaccpot with HH2a's back-reaction plan (#522)
-                from jaccpot.runtime.target_back_reaction import plan_back_reaction
-            except ImportError:
-                plan_back_reaction = None
+            plan_back_reaction = None
+            if back_reaction == "auto":
+                try:  # jaccpot with HH2a's back-reaction plan (#522)
+                    from jaccpot.runtime.target_back_reaction import (
+                        plan_back_reaction,
+                    )
+                except ImportError:
+                    pass
             if plan_back_reaction is not None:
                 plan_g = plan_back_reaction(
                     clu,

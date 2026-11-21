@@ -63,12 +63,12 @@ jobs:
   # jaccpot and yggdrax from GitHub at PINNED commits and runs those tests on CPU in
   # float64 (the fused-lane files run their Pallas kernels in interpret mode).
   #
-  # PINS: jaccpot main 122b2228 (2026-11-12, #519: target_points, which the hybrid
-  # Hermite tests use; also #520 M3 checkpoints) and yggdrax ba82e37 (#110, the
-  # Pallas walk move; it has everything jaccpot main imports). Bump them together:
-  # jaccpot's `yggdrax>=0.0.1` and jax window (>=0.11.2,<0.12) are what the resolver
-  # reconciles. Local (2026-11-12, jax 0.11.2, one process, jaccpot at #519's head
-  # f2cda4d4 before #520): 86 passed, 48 min.
+  # PINS: jaccpot main 5fc168a0 (2026-11-20, #522's merge: target_points at
+  # production scale -- the frontier walk, TargetSources planning and
+  # plan_back_reaction, which FusedHybridForce.prepare picks up by feature
+  # detection) and yggdrax ba82e37 (#110, the Pallas walk move; it has everything
+  # jaccpot main imports). Bump them together: jaccpot's `yggdrax>=0.0.1` and jax
+  # window (>=0.11.2,<0.12) are what the resolver reconciles.
   solver-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -76,7 +76,7 @@ jobs:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
       YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: 122b2228fddd4227336d1cfdaaeb0c854b000737
+      JACCPOT_REF: 5fc168a06616aa3eab8d956f9a4cd6b7af36bc14
 
     steps:
       - name: Checkout
@@ -119,7 +119,7 @@ jobs:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
       YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: 122b2228fddd4227336d1cfdaaeb0c854b000737
+      JACCPOT_REF: 5fc168a06616aa3eab8d956f9a4cd6b7af36bc14
 
     steps:
       - name: Checkout
