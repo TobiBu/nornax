@@ -1,4 +1,4 @@
-# Hybrid Hermite: direct-sum clusters inside an FMM galaxy (design note, sessions 1-2)
+# Hybrid Hermite: direct-sum clusters inside an FMM galaxy (design note, sessions 1-3)
 
 Multi-node accuracy plan, decision U6 (2026-11-03). The science driver is
 **globular clusters with direct-sum internal dynamics inside a live Milky Way**:
@@ -11,7 +11,8 @@ owns the science layer (ICs, demo; session 2+).
 Session 1 (2026-11-11) covers one cluster, the force split, the time integration,
 jaccpot `target_points`, and the gates of section 5. Session 2 (2026-11-15) adds
 many clusters (section 8), stripping (section 9) and the hybrid's default galaxy
-criterion (section 10), with its gates in section 11. Section 12 plans session 3+.
+criterion (section 10), with its gates in section 11. Section 12 plans session 3+;
+session 3's runner integration (track HH3b, 2026-11-21) is section 13.
 
 ## 0. User direction (2026-11-11, relayed by the lead; binding for session 1, not a final design lock)
 
@@ -669,9 +670,10 @@ The 1e5 + 1e4 FMM run was not repeated with ferrers3 (GPU time, see the report).
   job would have come near its 90-minute cap, so it was split rather than raised.
 - No jaccpot change was needed.
 
-## 12. Session 3+ plan (not built)
+## 12. Session 3+ plan (item 1 built in session 3: section 13)
 
-1. **Runner integration.** `ProductionRunner(scheme=HybridScheme(...))`:
+1. **Runner integration.** DONE (HH3b, section 13: `ProductionRunner(scheme=ClustersRunnerScheme(...))`). The plan was
+   `ProductionRunner(scheme=HybridScheme(...))`:
    - the runner's force evaluation becomes `FusedClustersForce.cluster_slow_accelerations` (galaxy step + targets),
      with the live-row cut its escaper split already uses (`StepParams.live`): stripped stars are tree rows past the
      galaxy's, exactly like returning escapers;
