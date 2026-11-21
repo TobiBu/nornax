@@ -19,6 +19,7 @@ import dataclasses
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from nornax.forces.mutual_direct import MutualDirectSumGravity
@@ -173,6 +174,10 @@ def test_a_donating_segment_is_rerun_from_a_kept_copy_of_its_start():
     positions, velocities, masses = _expanding()
     roomy = _Capped(capacity=100.0)
     want, _ = _run(roomy, _start(roomy, positions, velocities, masses))
+    # The start state aliases these arrays and the first attempt donates it, so
+    # the comparison needs copies the attempt cannot consume (JAX 0.12 frees
+    # the donated buffers here; 0.11.2 happened not to).
+    positions0, velocities0 = np.array(positions), np.array(velocities)
 
     def run(force, state):
         final = jax.jit(
@@ -186,16 +191,20 @@ def test_a_donating_segment_is_rerun_from_a_kept_copy_of_its_start():
     starts: list = []
 
     def replan(force, start, failures):
-        starts.append(start)
+        # The re-run donates this state too: record what the re-plan saw now.
+        starts.append(
+            (np.array(start.positions), np.array(start.velocities), start.acc)
+        )
         return _growing(1.5, [])(force, start, failures)
 
     got = retry_segment(
         start, tight, run, overflowed=_overflowed, replan=replan, donates=True
     )
     assert got.retries == 1
-    assert jnp.array_equal(starts[0].positions, positions)
-    assert jnp.array_equal(starts[0].velocities, velocities)
-    assert starts[0].acc is None
+    seen_positions, seen_velocities, seen_acc = starts[0]
+    assert np.array_equal(seen_positions, positions0)
+    assert np.array_equal(seen_velocities, velocities0)
+    assert seen_acc is None
     for name in ("positions", "velocities", "acc", "base_index"):
         assert jnp.array_equal(getattr(got.state, name), getattr(want, name)), name
 
