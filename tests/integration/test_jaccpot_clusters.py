@@ -175,9 +175,8 @@ def _run(force, aux, clusters, reserve=0, steps=STEPS):
 def test_one_cluster_is_session_one():
     """Bitwise here; a different program from session 1's (``_assert_same``).
 
-    Session 1 plans its back-reaction with the plain target walk, as
-    :class:`FusedClustersForce` does: with jaccpot #522 ``FusedHybridForce``
-    defaults to ``plan_back_reaction`` (a different approximation, 5e-10 apart).
+    Both plan the back-reaction with jaccpot's ``plan_back_reaction`` (``"auto"``):
+    one cluster takes the root split, :class:`FusedHybridForce`'s program.
     """
     xg, vg, mg, xc, vc, mc = _system()
     old = HybridHermite(n_sub=N_SUB, split=_split())
@@ -190,7 +189,6 @@ def test_one_cluster_is_session_one():
         mc[0],
         leaf_size=LEAF,
         max_order=ORDER,
-        back_reaction="walk",
     )
     s1 = jax.jit(
         lambda a: old.initial_state(
