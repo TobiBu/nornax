@@ -1405,7 +1405,9 @@ class FusedClustersForce:
         """The back-reaction plan sized at ``state`` (eager)."""
         setup = dict(self.setup or {})
         dtype = jnp.asarray(state.galaxy_positions).dtype
-        xs, ms = self._star_slots(state.clusters.positions, state.clusters.masses, dtype)
+        xs, ms = self._star_slots(
+            state.clusters.positions, state.clusters.masses, dtype
+        )
         ctopo = jax.jit(self.clusters.rebuild)(xs, ms)
         return _plan_back(
             self.clusters,

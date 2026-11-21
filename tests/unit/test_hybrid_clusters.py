@@ -806,17 +806,36 @@ def test_back_reaction_planning_covers_the_reserve(monkeypatch):
     mg4 = jnp.concatenate([mg, jnp.zeros(4, mg.dtype)])
     kw = dict(group_size=32, headroom=1.5, softening=EPS)
     plan = jh._plan_back(
-        None, None, xg4, mg4, n, xc, mc, back_reaction="auto",
-        back_options=dict(theta_mp=0.3), **kw,
+        None,
+        None,
+        xg4,
+        mg4,
+        n,
+        xc,
+        mc,
+        back_reaction="auto",
+        back_options=dict(theta_mp=0.3),
+        **kw,
     )
-    assert calls == [("auto", n + 4, True, True, 0.3), ("auto", n + 4, False, True, 0.3)]
+    assert calls == [
+        ("auto", n + 4, True, True, 0.3),
+        ("auto", n + 4, False, True, 0.3),
+    ]
     assert plan.num_groups == 2
     assert plan.inner.num_points == 96 and plan.inner.far_capacity == 20
     assert plan.inner.queue_capacity == 30
     calls.clear()
     one = jh._plan_back(
-        None, None, xg, mg, n, xc[:1], mc[:1], back_reaction="auto",
-        back_options=None, **kw,
+        None,
+        None,
+        xg,
+        mg,
+        n,
+        xc[:1],
+        mc[:1],
+        back_reaction="auto",
+        back_options=None,
+        **kw,
     )
     assert calls == [("auto", n, False, False, None)] and one.num_groups == 0
     calls.clear()
