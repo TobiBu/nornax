@@ -27,11 +27,13 @@ from nornax.solvers.leapfrog_kdk import (
 
 STEPS, DT = 8, 1e-2
 
-#: jaccpot's window (Python >= 3.12, JAX >= 0.11.2) is where the runner runs and
-#: where the scan and the rollout compile to the same bits. Older JAX (CI's
-#: Python 3.11 job resolves 0.10.2) fuses the two programs differently and moves
-#: the last bits of the velocities; there the claim is equality to round-off.
-_BITWISE = tuple(jax.__version_info__[:3]) >= (0, 11, 2)
+#: jaccpot's window (Python >= 3.12, 0.11.2 <= JAX < 0.12) is where the runner
+#: runs and where the scan and the rollout compile to the same bits. Outside it
+#: the two programs fuse differently and move the last bits: CI's Python 3.11 job
+#: resolves 0.10.2; JAX 0.12.1 (2026-11) leaves the positions bitwise but moves
+#: the velocities by <= 2 ulp and the accelerations by <= 5 ulp (relative 9e-16).
+#: There the claim is equality to round-off.
+_BITWISE = (0, 11, 2) <= tuple(jax.__version_info__[:3]) < (0, 12, 0)
 
 
 def _same(got, want) -> None:
