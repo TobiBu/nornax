@@ -448,3 +448,22 @@ def test_escapers_with_a_planned_force_permute_its_force_scale():
             escapers=None,
         )[1]
     )
+
+
+def test_static_plans_round_trip_typed():
+    from nornax.adapters.jaccpot_runner import _plan_dict, _plan_from
+
+    @dataclasses.dataclass(frozen=True)
+    class Inner:
+        a: int = 1
+        s: str = "m2p"
+
+    plan = StrippingPolicy(r_factor=1.5, centre=(0.0, 1.0, 2.0), dwell=2)
+    rec = json.loads(json.dumps(_plan_dict(plan)))
+    assert _plan_from(rec) == plan
+    assert _plan_from(None) is None and _plan_dict(np.float64(2.0)) == 2.0
+    with pytest.raises(ValueError, match="refusing"):
+        _plan_from({"dc": "os:stat_result", "f": {}})
+    with pytest.raises(TypeError):
+        _plan_dict(object())
+    assert _plan_dict(Inner())["f"] == {"a": 1, "s": "m2p"}

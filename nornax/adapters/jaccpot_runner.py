@@ -493,8 +493,47 @@ def _pin_record(slow: Any) -> Any:
     return trace_state(engines)
 
 
+_PLAN_MODULES = ("jaccpot.", "nornax.")
+
+
 def _plan_dict(plan: Any) -> Any:
-    return None if plan is None else dataclasses.asdict(plan)
+    """A static plan (nested frozen dataclasses of numbers/strings) as JSON.
+
+    ``{"dc": "module:qualname", "f": {...}}`` per dataclass, so a nested plan (e.g.
+    jaccpot's ``BackReactionPlan`` holding its ``TargetPlan``) comes back typed.
+    """
+    if plan is None or isinstance(plan, (bool, int, float, str)):
+        return plan
+    if dataclasses.is_dataclass(plan) and not isinstance(plan, type):
+        cls = type(plan)
+        return {
+            "dc": f"{cls.__module__}:{cls.__qualname__}",
+            "f": {
+                f.name: _plan_dict(getattr(plan, f.name))
+                for f in dataclasses.fields(plan)
+            },
+        }
+    if isinstance(plan, (tuple, list)):
+        return {"seq": [_plan_dict(v) for v in plan], "tuple": isinstance(plan, tuple)}
+    if isinstance(plan, np.generic):
+        return plan.item()
+    raise TypeError(f"cannot record a {type(plan).__name__} in a plan")
+
+
+def _plan_from(rec: Any) -> Any:
+    """:func:`_plan_dict`'s inverse (classes from jaccpot / nornax only)."""
+    if not isinstance(rec, dict):
+        return rec
+    if "seq" in rec:
+        items = [_plan_from(v) for v in rec["seq"]]
+        return tuple(items) if rec.get("tuple") else items
+    module, qual = rec["dc"].split(":")
+    if not module.startswith(_PLAN_MODULES):
+        raise ValueError(f"refusing to load a {rec['dc']} plan from a checkpoint")
+    cls: Any = importlib.import_module(module)
+    for part in qual.split("."):
+        cls = getattr(cls, part)
+    return cls(**{k: _plan_from(v) for k, v in rec["f"].items()})
 
 
 def _force_record(slow: Any, pin: Any) -> dict:
@@ -1193,12 +1232,11 @@ def _with_force_record(slow: Any, rec: dict, pin: Any) -> tuple:  # pragma: no c
         provider_record,
         provider_with_record,
     )
-    from jaccpot.runtime.target_points import TargetPlan
 
     bad = []
     kw: dict = {}
     for name, plan in rec["plans"].items():
-        kw[name] = None if plan is None else TargetPlan(**plan)
+        kw[name] = _plan_from(plan)
     gal, ok_g = provider_with_record(slow.galaxy, rec["providers"]["galaxy"])
     kw["galaxy"] = gal
     if not ok_g:
