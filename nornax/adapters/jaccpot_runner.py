@@ -262,6 +262,8 @@ class EscaperCoupledForce:
     ----------
     inner : Any
         The slow force.
+    split_kind : ClassVar[str]
+        ``"membership"``.
     """
 
     inner: Any
@@ -384,12 +386,9 @@ def encode_tree(tree: Any, prefix: str = "c") -> tuple:
     Returns
     -------
     tuple
-        ``(dict name -> array, spec)``; :func:`decode_tree` inverts it.
+        ``(dict name -> array, spec)``; :func:`decode_tree` inverts it. A node of
+        another kind is a ``TypeError``.
 
-    Raises
-    ------
-    TypeError
-        For a node of another kind.
     """
     arrays: dict = {}
 
@@ -441,10 +440,6 @@ def decode_tree(arrays: dict, spec: Any) -> Any:
     Any
         The pytree.
 
-    Raises
-    ------
-    ValueError
-        For a NamedTuple outside ``nornax``.
     """
 
     def dec(node: Any) -> Any:

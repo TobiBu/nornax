@@ -26,7 +26,6 @@ import numpy as np
 import pytest
 
 jaccpot = pytest.importorskip("jaccpot", reason="jaccpot is not importable")
-pytest.importorskip("jaccpot.carried", reason="jaccpot without the carried runner path")
 
 from jaccpot.escapers import EscaperPolicy  # noqa: E402
 from jaccpot.production import (  # noqa: E402
@@ -50,6 +49,14 @@ LEAF, ORDER, THETA = 16, 4, 0.6
 SOFTENING, EPS_C, DT, N_SUB = 1e-2, 1e-3, 1e-3, 4
 SEGS, STEPS, RESERVE = 3, 2, 1
 POLICY = StrippingPolicy(r_factor=0.3, min_members=4)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _carried_path():
+    """Skip (per test: the job collects them) until the jaccpot pin has HH3b."""
+    pytest.importorskip(
+        "jaccpot.carried", reason="jaccpot without the carried runner path (HH3b)"
+    )
 
 
 @pytest.fixture(scope="module", autouse=True)
