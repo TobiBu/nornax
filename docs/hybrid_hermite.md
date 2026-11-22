@@ -418,7 +418,9 @@ opening kick, as in section 3.
 
 - galaxy -> stars: one `target_points` evaluation over all `K x M_max` slots (an empty slot's field is discarded);
 - stars -> galaxy: one star provider over all slots (geometric criterion, a small softening for its own walk), its
-  field at the galaxy's rows with the galaxy's softening (`target_field(softening=)`), as session 1's back-reaction;
+  field at the galaxy's rows with the galaxy's softening (`target_field(softening=)`). Since session 3 it is jaccpot's
+  grouped back-reaction (section 13: each cluster's own multipole beyond its own `r_in`, the star tree's walk for
+  the galaxy rows inside any); session 2 walked every galaxy row;
 - cluster -> cluster, the `coupling`:
   - `"fmm"`: the star provider's field at the stars minus each cluster's own field (exact, galaxy kernel, self pair
     included). What remains of a cluster's own pairs is the FMM's error on them (the A-type error of section 1).
@@ -455,13 +457,14 @@ galaxy's tree over the live rows in their own box, the rest massless and in no l
   appended they are the same bitwise for `R` = 64 and 256. The rows past `n_live` get exactly zero.
 
 **The free rows are invisible to the back-reaction.** The back-reaction evaluates the star tree's field at every
-galaxy row through `target_points`, which groups its points along a Morton curve of their box. Free rows at arbitrary
-places would shift the live rows' groups (a reserve, and its size, would move their back-reaction in the last bits),
-and an overflowing plan would truncate it. So each evaluation puts the free rows on the live point that comes LAST on
-that curve (`_back_targets`): the box and every live group are as without them, and the last live group only gains
-copies of a point it holds. The plan is sized for that layout plus the free rows parked among the clusters (where
-stripped stars arrive, `park_rows`; the capacities are totals, so they add). This uses jaccpot's private
-`_morton_order` (with a replica if it moves: only the invariance, never correctness, depends on it). If a capacity
+galaxy row. Free rows at arbitrary places would shift the live rows' target groups (a reserve, and its size, would
+move their back-reaction in the last bits), and an overflowing plan would truncate it. Since session 3 (section 13)
+the evaluation passes jaccpot's public `point_mask` (the live rows): masked rows get zeros and are compacted out
+before the inner walk groups its points, so neither a reserve nor its size changes a live row's back-reaction
+(bitwise, the two reserve tests in strict mode). The plan is sized for that layout and for one with the free rows
+parked among the clusters (where stripped stars arrive, `park_rows`), merged (inner capacity the larger, the walk's
+capacities summed). Session 2 put the free rows on the live point that came last on jaccpot's private
+`_morton_order` curve instead; that read is gone. If a capacity
 still overflows (a verdict fails), `run_segments` reruns the segment from its start with everything grown to what the
 failed segment needed, as the runner's segment retry does: `slow.replanned(start, failed=end)`. The verdict is kept
 per part (`ok[4]`: the field at the stars, the back-reaction, the star tree's capacities, the coupling; `needs[3, 2]`
@@ -721,3 +724,31 @@ The 1e5 + 1e4 FMM run was not repeated with ferrers3 (GPU time, see the report).
    - the dissolution threshold;
    - whether a stripped star should keep a star-sized softening against other stripped stars. Today it gets the
      galaxy's: a stream is collisionless at these resolutions.
+
+## 13. Many clusters at production scale (session 3, HH3a)
+
+Session 2's `FusedClustersForce` planned the stars' field at the galaxy with the plain target walk over every
+galaxy row: at 1e8 that does not fit one card (session 1 needed ~10-11 GB of per-point transients for ONE cluster),
+and one root multipole of the star tree is useless when the clusters sit all over the galaxy (its radius spans the
+galaxy). Session 3 (track HH3a; jaccpot `## HH3a` in `docs/production_2026-11.md`) changes the planning, not the
+scheme:
+
+- **The back-reaction** is jaccpot's `plan_back_reaction` / `target_field(groups=)` with `SourceGroups(xc, mc)` for
+  `K > 1`: each cluster's multipole about its own COM beyond its own `r_in_k = max(R_k / theta_mp, R_k + floor)`
+  (`R_k` its farthest member), the star tree's target walk for the galaxy rows inside any cluster's `r_in_k`, the
+  outer rows in slices. A dissolved cluster (no mass) contributes nothing. `K = 1` takes the root split, which is
+  `FusedHybridForce`'s `back_reaction="auto"` program: K = 1 equals it bitwise on this host (the session-1 test no
+  longer needs `back_reaction="walk"`).
+- **`FusedClustersForce.prepare(back_reaction="auto"|"walk", back_options=None)`** (added, compatible: the default is
+  the new path; `"walk"` is session 2's plain walk with the free rows masked; `back_options` passes
+  `plan_back_reaction`'s `theta_mp`, `mp_order`, `r_min`, `min_inner`, `slice_size`, `group_chunk`). Both are kept in
+  `setup`, so `with_reserve` / `replanned` re-plan the same way. The signatures of the force methods and the aux
+  layout are unchanged.
+- **Galaxy -> stars** is planned from jaccpot's `TargetSources` (as `FusedHybridForce.prepare` since #35): the eager
+  galaxy topology is dropped first and each planning round rebuilds in its own program. With a reserve the sources
+  carry the live-row cut (`TargetSources(bounds=live_bounds(...), num_valid=n_live)`, the masses past `n_live` zero),
+  which is the evaluation's `_live_topology` rebuild.
+- **Free rows**: jaccpot's public `point_mask` (section 9), not the private Morton trick.
+- **Retry**: a failed back-reaction (`ok[1]`) may have overflowed its inner capacity, which `needs` does not carry;
+  `replanned(start, failed=end)` re-sizes the back-reaction plan at the failed end state and merges it in
+  (`BackReactionPlan.grown` covers the needs).

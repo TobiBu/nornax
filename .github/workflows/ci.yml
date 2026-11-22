@@ -76,7 +76,7 @@ jobs:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
       YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: 5fc168a06616aa3eab8d956f9a4cd6b7af36bc14
+      JACCPOT_REF: 3a79288470b83dd37df91dc26784fdd2a3640b4a
 
     steps:
       - name: Checkout
@@ -119,7 +119,7 @@ jobs:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
       YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: 5fc168a06616aa3eab8d956f9a4cd6b7af36bc14
+      JACCPOT_REF: 3a79288470b83dd37df91dc26784fdd2a3640b4a
 
     steps:
       - name: Checkout
