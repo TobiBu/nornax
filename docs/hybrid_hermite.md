@@ -1,4 +1,4 @@
-# Hybrid Hermite: direct-sum clusters inside an FMM galaxy (design note, sessions 1-2)
+# Hybrid Hermite: direct-sum clusters inside an FMM galaxy (design note, sessions 1-3)
 
 Multi-node accuracy plan, decision U6 (2026-11-03). The science driver is
 **globular clusters with direct-sum internal dynamics inside a live Milky Way**:
@@ -11,7 +11,9 @@ owns the science layer (ICs, demo; session 2+).
 Session 1 (2026-11-11) covers one cluster, the force split, the time integration,
 jaccpot `target_points`, and the gates of section 5. Session 2 (2026-11-15) adds
 many clusters (section 8), stripping (section 9) and the hybrid's default galaxy
-criterion (section 10), with its gates in section 11. Section 12 plans session 3+.
+criterion (section 10), with its gates in section 11. Section 12 plans session 3+;
+session 3 (2026-11-21) adds many clusters at production scale (track HH3a, section 13) and
+the runner integration (track HH3b, section 14).
 
 ## 0. User direction (2026-11-11, relayed by the lead; binding for session 1, not a final design lock)
 
@@ -672,9 +674,10 @@ The 1e5 + 1e4 FMM run was not repeated with ferrers3 (GPU time, see the report).
   job would have come near its 90-minute cap, so it was split rather than raised.
 - No jaccpot change was needed.
 
-## 12. Session 3+ plan (session 3 built the scale parts of items 1 and 5: section 13)
+## 12. Session 3+ plan (session 3 built item 1 -- section 14, HH3b -- and the scale parts of items 1 and 5 -- section 13, HH3a)
 
-1. **Runner integration.** `ProductionRunner(scheme=HybridScheme(...))`:
+1. **Runner integration.** DONE (HH3b, section 14: `ProductionRunner(scheme=ClustersRunnerScheme(...))`). The plan was
+   `ProductionRunner(scheme=HybridScheme(...))`:
    - the runner's force evaluation becomes `FusedClustersForce.cluster_slow_accelerations` (galaxy step + targets),
      with the live-row cut its escaper split already uses (`StepParams.live`): stripped stars are tree rows past the
      galaxy's, exactly like returning escapers;
@@ -795,3 +798,66 @@ passed. During the stripping segments the galaxy's state is resident twice (`run
 for the needs-driven retry): 13.9 GB. Levers if a production run needs room: a core / tail split of each cluster
 for the back-reaction (a smaller `R_k`, a smaller inner set), a retry from a checkpoint instead of a second state, a
 smaller inner headroom.
+
+## 14. Session 3: the clusters inside jaccpot's `ProductionRunner` (HH3b, 2026-11-21)
+
+Section 12 item 1, built. jaccpot `docs/production_2026-11.md` `## HH3b` has the runner side and the gates.
+
+**The API.**
+
+```python
+from jaccpot.escapers import EscaperPolicy
+from jaccpot.production import ProductionRunner, SegmentConfig
+from nornax.adapters.jaccpot_hybrid import galaxy_solver
+from nornax.adapters.jaccpot_runner import ClustersRunnerScheme
+
+clusters = ClustersRunnerScheme(
+    ClusterHybridHermite(n_sub=16, split=MembershipSplit(DirectSumGravity(...))),
+    (xc, vc, mc),                        # [K, M] (zero mass: an empty slot)
+    reserve=4096,                        # free galaxy rows for stripped stars (grown when full)
+    policy=StrippingPolicy(),            # None: no stripping
+    cluster_solver=galaxy_solver(mac_type="dehnen", theta=0.5, softening=eps_c),
+    options=dict(cross="fmm", coupling="fmm", cluster_leaf_size=64),
+)
+runner = ProductionRunner(galaxy_solver(softening=eps_g), settings=..., segment=SegmentConfig(steps=10,
+                          restart_every=1, restart_path="ckpt_{segment}"),   # orbax dir; "*.npz": a file
+                          scheme=clusters, escapers=EscaperPolicy(80.0))      # escapers optional
+result = runner.run(galaxy_state, galaxy_masses, dt=dt, num_steps=n)        # [N, 2, 3], [N]
+result.carried.state                     # the ClusterHybridState; result.state: the galaxy, caller order
+runner.run(dt=dt, num_steps=m, restart_from="ckpt_3")                       # a fresh process: bitwise
+```
+
+`ClustersRunnerScheme` implements jaccpot's `CarriedScheme` (the scheme owns its carry and programs; the runner keeps
+the loop). Any `ClusterSlowForce` works through `slow_factory=` (the unit tests run `DirectClustersForce`).
+
+**What it does** (`nornax/adapters/jaccpot_runner.py`):
+
+- **The carry** (`RunnerCarry`): the `ClusterHybridState` (galaxy rows, `n_live`, `galaxy_star_id`, the `[K, M]` block
+  with internal derivatives, `cluster_acc`, dwell, star ids, the ledger, the force's aux), the slow force, the
+  trace-time record its programs are pinned to, the host row order (caller row of each galaxy row) and counters.
+- **Programs**: `run_segments`' (`_Programs`: `jit(cluster_rollout)`, candidates, transfer, refresh), in its order at
+  an edge, so the runner equals `run_segments` over the same steps and edges, **bitwise** (gate 1).
+- **One live-row mechanism** (section 9's rows, extended): `[tree rows (n_live) | free rows | escapers]`. A stripped
+  star is a tree row past the galaxy's (row `n_live`, as before), like a returning escaper; a row past `n_live` with
+  mass is an escaper (`EscaperCoupledForce`: the inner force plus jaccpot.escapers' monopole coupling, active only
+  while there are escapers; `ClusterHybridHermite._slow` keeps the rows a force marks with `kept_rows`); free rows have
+  no mass. An escaper check re-orders the rows stably; a reserve growth moves the escapers back to the tail.
+  `ClusterHybridState.reserve` counts escapers as occupied. Stars and escapers do not interact.
+- **Ledgers**: a transfer's exact pair jump plus, with escapers, the exact change of `W_c` (the star joins the tree
+  rows the escapers' monopole holds); an escaper change's measured jump (the runner's). `measure_jumps=True` reports a
+  stripping edge's full measured jump next to the ledger's (`strip_jump_measured`).
+- **Checkpoints**: `checkpoint` writes every state leaf as named arrays (`encode_tree`/`decode_tree`) and, in `meta`,
+  the force's static plan and its engines' trace-time state; `restore` re-prepares the force for its structure,
+  installs the plan and compares the digests. Restarts equal the uninterrupted run bitwise in a fresh process, `.npz`
+  and orbax, at ordinary edges, at transfer edges and right after reserve re-plans (gate 2), with escapers too (gate 3).
+- **Energy programs are cached per force** (`FusedClustersForce.energy`, `DirectClustersForce.energy`, `W_cc`): the
+  runner's energy edges compile once per plan, not once per call. `DirectClustersForce.energy` counts the tree rows only
+  (an escaper is not a galaxy source).
+
+**Gates**: jaccpot `docs/production_2026-11.md` `## HH3b` and `mn-scratch/hh3b/REPORT.md`. Tests:
+`tests/unit/test_jaccpot_runner_scheme.py` (no jaccpot: the driver against `run_segments`, restarts, escapers with
+both ledgers, a planned force's verdicts and re-plans) and `tests/integration/test_jaccpot_runner.py` (the fused lane
+through jaccpot's runner; CI job `solver-tests-runner`, skipped until the jaccpot pin has `jaccpot.carried`).
+
+**Not in session 3**: the mesh (the runner refuses the clusters there), Aarseth steps, the GC science layer, HoreKa
+timing, the physics choices (today's defaults).

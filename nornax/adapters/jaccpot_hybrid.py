@@ -1753,7 +1753,6 @@ class FusedClustersForce:
         cl = state.clusters
         gal = self.galaxy
 
-        @jax.jit
         def terms(xg, mg, n_live, fb, xc, mc, fbs):
             if self.reserve:
                 topo = _live_topology(gal, xg, mg, n_live, fb)
@@ -1779,7 +1778,14 @@ class FusedClustersForce:
                 _, pot_x, _, _ = self._coupling_field(xs, ms, ctopo, potential=True)
             return phi, pot_c, pot_x
 
-        phi, pot_c, pot_x = terms(
+        # one program per force (HH3b: the runner's energy edges compile once)
+        from nornax.hybrid_clusters import _ENERGY_PROGRAMS
+
+        kept = _ENERGY_PROGRAMS.get(id(self))
+        if kept is None or kept[0] is not self:
+            kept = (self, jax.jit(terms))
+            _ENERGY_PROGRAMS[id(self)] = kept
+        phi, pot_c, pot_x = kept[1](
             state.galaxy_positions,
             state.galaxy_masses,
             state.n_live,

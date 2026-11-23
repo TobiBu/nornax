@@ -148,9 +148,16 @@ class ClusterHybridState(NamedTuple):
 
     @property
     def reserve(self) -> int:
-        """Galaxy rows past the galaxy's particles (``R``), from the ids (eager)."""
-        n_g = int(self.n_live) - int(np.sum(np.asarray(self.galaxy_star_id) >= 0))
-        return int(self.galaxy_masses.shape[0]) - n_g
+        """Galaxy rows past the galaxy's particles (``R``), from the ids (eager).
+
+        Rows past ``n_live`` with mass (the runner's escapers, galaxy particles or
+        stripped stars) count as occupied.
+        """
+        m = np.asarray(self.galaxy_masses)
+        rows = np.arange(m.shape[0])
+        occupied = int(self.n_live) + int(np.sum((rows >= int(self.n_live)) & (m > 0)))
+        n_g = occupied - int(np.sum(np.asarray(self.galaxy_star_id) >= 0))
+        return int(m.shape[0]) - n_g
 
 
 @runtime_checkable
@@ -412,6 +419,11 @@ def _plummer_field_blocked(
     return acc, pot
 
 
+#: the energy programs of the slow forces, by ``id`` (the force kept with its
+#: program, so an id is never reused while it is in here)
+_ENERGY_PROGRAMS: dict = {}
+
+
 @dataclass(frozen=True)
 class DirectClustersForce:
     """The many-cluster slow force by direct summation (Plummer): the reference.
@@ -600,11 +612,23 @@ class DirectClustersForce:
             state,
         )
         cl = st.clusters
-        _, p_g, _, p_c, p_cc = jax.jit(
-            lambda xg, mg, n, xc, mc: self._fields(xg, mg, n, xc, mc, True)
-        )(st.galaxy_positions, st.galaxy_masses, st.n_live, cl.positions, cl.masses)
+        prog = _ENERGY_PROGRAMS.get(id(self))
+        if prog is None or prog[0] is not self:
+            prog = (
+                self,
+                jax.jit(
+                    lambda xg, mg, n, xc, mc: self._fields(xg, mg, n, xc, mc, True)
+                ),
+            )
+            _ENERGY_PROGRAMS[id(self)] = prog
+        _, p_g, _, p_c, p_cc = prog[1](
+            st.galaxy_positions, st.galaxy_masses, st.n_live, cl.positions, cl.masses
+        )
         f64 = np.float64
         mg = np.asarray(st.galaxy_masses, f64)
+        # the tree rows only: a row past n_live with mass (the runner's escaper)
+        # is not a galaxy source (its coupling is the runner's W_c)
+        mg = np.where(np.arange(mg.shape[0]) < int(st.n_live), mg, 0.0)
         mc = np.asarray(cl.masses, f64)
         W_gg = 0.5 * float(np.sum(mg * np.asarray(p_g, f64)))
         W_gc = float(np.sum(mc * np.asarray(p_c, f64)))
@@ -674,6 +698,19 @@ def _internal_constants(scheme: "ClusterHybridHermite") -> tuple[float, float]:
     return float(getattr(model, "G", 1.0)), float(getattr(model, "softening", 0.0))
 
 
+_INTRA_ENERGY: dict = {}
+
+
+def _intra_energy_program(G_c: float, eps_c: float) -> Callable:
+    """Every cluster's internal pair energy, one jitted program per ``(G, eps)``."""
+    key = (float(G_c), float(eps_c))
+    if key not in _INTRA_ENERGY:
+        _INTRA_ENERGY[key] = jax.jit(
+            lambda x, m: jax.vmap(lambda a, b: _intra_pair_energy(a, b, *key))(x, m)
+        )
+    return _INTRA_ENERGY[key]
+
+
 def energy_terms(
     state: ClusterHybridState,
     scheme: "ClusterHybridHermite",
@@ -716,9 +753,7 @@ def energy_terms(
     xc = np.asarray(cl.positions, f64)
     vc = np.asarray(cl.velocities, f64)
     mc = np.asarray(cl.masses, f64)
-    W_cc = jax.jit(
-        lambda x, m: jax.vmap(lambda a, b: _intra_pair_energy(a, b, G_c, eps_c))(x, m)
-    )(jnp.asarray(xc), jnp.asarray(mc))
+    W_cc = _intra_energy_program(G_c, eps_c)(jnp.asarray(xc), jnp.asarray(mc))
     out = dict(
         K_g=0.5 * float(np.sum(mg * np.sum(vg**2, 1))),
         K_c=0.5 * float(np.sum(mc * np.sum(vc**2, -1))),
@@ -839,7 +874,11 @@ class ClusterHybridHermite:
         xc = None if (cl is None or not self.coupled) else cl.positions
         mc = None if (cl is None or not self.coupled) else cl.masses
         a_g, a_c, aux = slow.cluster_slow_accelerations(xg, mg, n_live, xc, mc, aux=aux)
-        a_g = _zero_dead(jnp.asarray(a_g, xg.dtype), _rows_live(xg.shape[0], n_live))
+        rows_ok = _rows_live(xg.shape[0], n_live)
+        kept = getattr(slow, "kept_rows", None)
+        if kept is not None:  # rows past n_live that move (the runner's escapers)
+            rows_ok = kept(rows_ok, mg)
+        a_g = _zero_dead(jnp.asarray(a_g, xg.dtype), rows_ok)
         if cl is not None:
             if a_c is None:
                 a_c = jnp.zeros_like(cl.positions)
