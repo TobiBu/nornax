@@ -63,10 +63,9 @@ jobs:
   # jaccpot and yggdrax from GitHub at PINNED commits and runs those tests on CPU in
   # float64 (the fused-lane files run their Pallas kernels in interpret mode).
   #
-  # PINS: jaccpot main 5fc168a0 (2026-11-20, #522's merge: target_points at
-  # production scale -- the frontier walk, TargetSources planning and
-  # plan_back_reaction, which FusedHybridForce.prepare picks up by feature
-  # detection) and yggdrax ba82e37 (#110, the Pallas walk move; it has everything
+  # PINS: jaccpot main 21b9cc4c (2026-11-23, #524's merge: the carried-scheme
+  # runner seam, jaccpot.carried, which the clusters runner tests need; it also
+  # has #522's target_points at production scale) and yggdrax ba82e37 (#110, the Pallas walk move; it has everything
   # jaccpot main imports). Bump them together: jaccpot's `yggdrax>=0.0.1` and jax
   # window (>=0.11.2,<0.12) are what the resolver reconciles.
   solver-tests:
@@ -76,7 +75,7 @@ jobs:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
       YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: 5fc168a06616aa3eab8d956f9a4cd6b7af36bc14
+      JACCPOT_REF: 21b9cc4c776a0b0df68c36f0d70ac4214534852d
 
     steps:
       - name: Checkout
@@ -119,7 +118,7 @@ jobs:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
       YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: 5fc168a06616aa3eab8d956f9a4cd6b7af36bc14
+      JACCPOT_REF: 21b9cc4c776a0b0df68c36f0d70ac4214534852d
 
     steps:
       - name: Checkout
@@ -157,7 +156,7 @@ jobs:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
       YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: 5fc168a06616aa3eab8d956f9a4cd6b7af36bc14
+      JACCPOT_REF: 21b9cc4c776a0b0df68c36f0d70ac4214534852d
 
     steps:
       - name: Checkout
