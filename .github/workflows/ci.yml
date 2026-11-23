@@ -63,10 +63,9 @@ jobs:
   # jaccpot and yggdrax from GitHub at PINNED commits and runs those tests on CPU in
   # float64 (the fused-lane files run their Pallas kernels in interpret mode).
   #
-  # PINS: jaccpot main 5fc168a0 (2026-11-20, #522's merge: target_points at
-  # production scale -- the frontier walk, TargetSources planning and
-  # plan_back_reaction, which FusedHybridForce.prepare picks up by feature
-  # detection) and yggdrax ba82e37 (#110, the Pallas walk move; it has everything
+  # PINS: jaccpot main 21b9cc4c (2026-11-23, #524's merge: the carried-scheme
+  # runner seam, jaccpot.carried, which the clusters runner tests need; it also
+  # has #522's target_points at production scale) and yggdrax ba82e37 (#110, the Pallas walk move; it has everything
   # jaccpot main imports). Bump them together: jaccpot's `yggdrax>=0.0.1` and jax
   # window (>=0.11.2,<0.12) are what the resolver reconciles.
   solver-tests:
@@ -76,7 +75,7 @@ jobs:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
       YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: 5fc168a06616aa3eab8d956f9a4cd6b7af36bc14
+      JACCPOT_REF: 21b9cc4c776a0b0df68c36f0d70ac4214534852d
 
     steps:
       - name: Checkout
@@ -119,7 +118,7 @@ jobs:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
       YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: 5fc168a06616aa3eab8d956f9a4cd6b7af36bc14
+      JACCPOT_REF: 21b9cc4c776a0b0df68c36f0d70ac4214534852d
 
     steps:
       - name: Checkout
@@ -145,3 +144,40 @@ jobs:
           pytest -o addopts="" --no-header -q
           tests/integration/test_jaccpot_hybrid.py
           tests/integration/test_jaccpot_clusters.py
+
+  # The clusters inside jaccpot's ProductionRunner (HH3b, 2026-11-21): the runner
+  # against run_segments, restarts in a fresh runner, escapers + stripping. A job of
+  # its own (each case compiles the fused lane's clusters programs: ~15-20 min on a
+  # loaded 64-core host). The tests skip until JACCPOT_REF has jaccpot.carried.
+  solver-tests-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
+      JACCPOT_REF: 21b9cc4c776a0b0df68c36f0d70ac4214534852d
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          # jaccpot requires Python >= 3.12.
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install nornax + jaccpot and yggdrax at the pinned commits
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" \
+            "yggdrax @ git+https://github.com/TobiBu/yggdrax.git@${YGGDRAX_REF}" \
+            "jaccpot @ git+https://github.com/TobiBu/jaccpot.git@${JACCPOT_REF}"
+          python -c "import jax, jaccpot, yggdrax; print('jax', jax.__version__)"
+
+      - name: The clusters in jaccpot's ProductionRunner (CPU)
+        run: >-
+          pytest -o addopts="" --no-header -q
+          tests/integration/test_jaccpot_runner.py
