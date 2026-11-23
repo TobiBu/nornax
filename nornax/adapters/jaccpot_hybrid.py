@@ -527,6 +527,7 @@ class FusedHybridForce:
 # ---------------------------------------------------------------------------
 
 _COUPLING = ("fmm", "direct", "none")
+_BACK = ("auto", "walk")
 
 
 def galaxy_solver(**kwargs: Any) -> Any:
@@ -639,57 +640,130 @@ def _live_topology(provider: Any, x: Any, m: Any, n_live: Any, force_scale: Any)
     )
 
 
-def _morton_last(points: Any, live: Any) -> Any:
-    """The live point the target walk's Morton order puts LAST (traced).
+def _live_mask(rows: int, n_live: Any) -> Any:
+    """``[rows]`` bool: the live galaxy rows (``row < n_live``)."""
+    return jnp.arange(int(rows), dtype=jnp.int32) < jnp.asarray(n_live, jnp.int32)
 
-    ``jaccpot.runtime.target_points._morton_order``'s curve over the live points'
-    box (the free rows folded onto row 0 inside it); ties go to the highest row,
-    as its stable argsort does. A private jaccpot function: if it moves, the
-    replica below is used (a different order only costs the bitwise invariance,
-    never correctness: the free rows' fields are discarded).
+
+def _live_sources(xg: Any, mg: Any, n_live: Any, f_b: Any, cubic: bool) -> Any:
+    """``jaccpot``'s ``TargetSources`` of the live rows: :func:`_live_topology`'s rebuild, in-program.
+
+    A planning round rebuilds from these inside its own program (HH2a's
+    ``TargetSources``), so no eager galaxy topology stays resident beside the
+    target program (at 1e8 it did not leave room on an A100).
     """
-    pts = jnp.where(live[:, None], points, points[0][None, :])
-    try:
-        from jaccpot.runtime.target_points import _morton_order
-    except ImportError:  # pragma: no cover - the replica
-        _morton_order = None
-    if _morton_order is not None:
-        return pts[_morton_order(pts)[-1]]
-    lo, hi = jnp.min(pts, 0), jnp.max(pts, 0)  # pragma: no cover
-    span = jnp.maximum(
-        jnp.max(hi - lo), jnp.asarray(1e-30, pts.dtype)
-    )  # pragma: no cover
-    q = jnp.clip(((pts - lo) / span) * 1023.0, 0.0, 1023.0)  # pragma: no cover
-    q = q.astype(jnp.uint32)  # pragma: no cover
+    from jaccpot.escapers import live_bounds
+    from jaccpot.runtime.target_points import TargetSources
 
-    def spread(v: Any) -> Any:  # pragma: no cover
-        v = (v | (v << 16)) & jnp.uint32(0x030000FF)
-        v = (v | (v << 8)) & jnp.uint32(0x0300F00F)
-        v = (v | (v << 4)) & jnp.uint32(0x030C30C3)
-        return (v | (v << 2)) & jnp.uint32(0x09249249)
-
-    code = spread(q[:, 0]) | (spread(q[:, 1]) << 1)  # pragma: no cover
-    code = code | (spread(q[:, 2]) << 2)  # pragma: no cover
-    return pts[jnp.argsort(code, stable=True)[-1]]  # pragma: no cover
-
-
-def _back_targets(xg: Any, n_live: Any, provider: Any) -> Any:
-    """The back-reaction's targets: the live rows, the free rows on the LAST live one.
-
-    ``target_points`` groups its points along a Morton curve of their box. Free
-    rows placed on the live point that comes last on that curve leave the box and
-    every live group as without them (the last live group only gains copies of a
-    point it already holds), so neither a reserve nor its size changes a live
-    row's back-reaction: an unused or re-planned reserve matches runs without it
-    bitwise (``docs/hybrid_hermite.md`` section 9). The free rows' fields are
-    discarded.
-    """
-    dtype = getattr(provider.engine, "working_dtype", None) or jnp.asarray(xg).dtype
-    live = jnp.arange(xg.shape[0], dtype=jnp.int32) < jnp.asarray(n_live, jnp.int32)
-    last = _morton_last(jnp.asarray(xg, dtype), live)
-    return jnp.where(
-        live[:, None], xg, jnp.asarray(last, jnp.asarray(xg).dtype)[None, :]
+    live = _live_mask(xg.shape[0], n_live)
+    return TargetSources(
+        xg,
+        jnp.where(live, mg, jnp.zeros((), mg.dtype)),
+        f_b,
+        bounds=live_bounds(xg, n_live, cubic=cubic),
+        num_valid=jnp.asarray(n_live, jnp.int32),
     )
+
+
+def _merged_back(a: Any, b: Any) -> Any:
+    """Back-reaction plan ``a`` covering ``b`` too (inner capacity max, walk capacities summed)."""
+    inner = dataclasses.replace(
+        a.inner,
+        num_points=max(int(a.inner.num_points), int(b.inner.num_points)),
+        far_capacity=int(a.inner.far_capacity) + int(b.inner.far_capacity),
+        near_capacity=int(a.inner.near_capacity) + int(b.inner.near_capacity),
+        queue_capacity=max(int(a.inner.queue_capacity), int(b.inner.queue_capacity)),
+    )
+    return dataclasses.replace(a, inner=inner)
+
+
+def _back_groups(xc: Any, mc: Any, dtype: Any) -> Any:
+    """jaccpot's ``SourceGroups`` of the ``[K, M]`` star slots (empty slots: zero mass)."""
+    from jaccpot.runtime.target_back_reaction import SourceGroups
+
+    return SourceGroups(jnp.asarray(xc, dtype), jnp.asarray(mc, dtype))
+
+
+def _plan_back(
+    clu: Any,
+    ctopo: Any,
+    xg: Any,
+    mg: Any,
+    n_live: int,
+    xc: Any,
+    mc: Any,
+    *,
+    back_reaction: str,
+    back_options: dict | None,
+    group_size: int,
+    headroom: float,
+    softening: float,
+) -> Any:
+    """The stars -> galaxy plan, sized for the live rows AND the free rows parked among the clusters.
+
+    The evaluation masks the free rows out (``point_mask``: zero field, no part
+    in the inner walk's groups, so a reserve changes no live row's force,
+    bitwise); a second plan with the free rows parked where stripped stars land
+    (all rows active) is merged in, so the plan holds them once they arrive.
+    ``"auto"``: jaccpot's ``plan_back_reaction``, grouped for ``K > 1``.
+    ``"walk"``: the plain target walk.
+    """
+    from jaccpot.runtime import target_points as tp
+
+    rows = int(xg.shape[0])
+    n_free = rows - int(n_live)
+    live = _live_mask(rows, n_live) if n_free else None
+    planning = _planning_rows(xg, mg, int(n_live), xc, mc)[0] if n_free else None
+    if back_reaction == "walk":
+        plan = tp.plan_target_points(
+            clu,
+            ctopo,
+            xg,
+            group_size=group_size,
+            headroom=headroom,
+            softening=softening,
+            point_mask=live,
+        )
+        if n_free:
+            extra = tp.plan_target_points(
+                clu,
+                ctopo,
+                planning,
+                group_size=group_size,
+                headroom=headroom,
+                softening=softening,
+            )
+            plan = _summed(plan, extra)
+        return plan
+    from jaccpot.runtime.target_back_reaction import plan_back_reaction
+
+    K = int(jnp.shape(mc)[0])
+    groups = _back_groups(xc, mc, jnp.asarray(xg).dtype) if K > 1 else None
+    kw = dict(back_options or {})
+    plan = plan_back_reaction(
+        clu,
+        ctopo,
+        xg,
+        group_size=group_size,
+        headroom=headroom,
+        softening=softening,
+        point_mask=live,
+        groups=groups,
+        **kw,
+    )
+    if n_free:
+        extra = plan_back_reaction(
+            clu,
+            ctopo,
+            planning,
+            group_size=group_size,
+            headroom=headroom,
+            softening=softening,
+            groups=groups,
+            **kw,
+        )
+        plan = _merged_back(plan, extra)
+    return plan
 
 
 def _summed(a: Any, b: Any) -> Any:
@@ -886,6 +960,8 @@ class FusedClustersForce:
         headroom: float = 1.5,
         n_live: int | None = None,
         galaxy_aux: Any = None,
+        back_reaction: str = "auto",
+        back_options: dict | None = None,
     ) -> tuple["FusedClustersForce", Any]:
         """Prepare the providers and size the target plans at the given positions.
 
@@ -928,6 +1004,18 @@ class FusedClustersForce:
         galaxy_aux : Any
             The galaxy's ``(f_b, bits, needs)`` over the padded rows (a re-plan
             under ``dehnen_error``; skips the bootstrap).
+        back_reaction : str
+            The stars' field at the galaxy rows (``cross="fmm"``): ``"auto"``
+            (default) jaccpot's ``plan_back_reaction`` -- for ``K > 1`` grouped
+            (``SourceGroups``: each cluster's own multipole beyond its own
+            ``r_in``, the star tree's target walk for the galaxy rows inside
+            any), for ``K == 1`` the root split, which is
+            :class:`FusedHybridForce`'s ``"auto"`` program; ``"walk"`` the plain
+            target walk over every galaxy row (session 2; does not fit 1e8).
+        back_options : dict | None
+            Extra keywords of jaccpot's ``plan_back_reaction`` (``theta_mp``,
+            ``mp_order``, ``r_min``, ``min_inner``, ``slice_size``,
+            ``group_chunk``); ``None``: its defaults.
 
         Returns
         -------
@@ -937,15 +1025,21 @@ class FusedClustersForce:
         Raises
         ------
         ValueError
-            For an unknown ``cross``/``coupling``, rows that are not ``N_g +
-            reserve``, or a cluster solver with a force-scale criterion.
+            For an unknown ``cross``/``coupling``/``back_reaction``, rows that
+            are not ``N_g + reserve``, or a cluster solver with a force-scale
+            criterion.
         """
         if cross not in _CROSS:
             raise ValueError(f"cross must be one of {_CROSS}, got {cross!r}")
         if coupling not in _COUPLING:
             raise ValueError(f"coupling must be one of {_COUPLING}, got {coupling!r}")
+        if back_reaction not in _BACK:
+            raise ValueError(
+                f"back_reaction must be one of {_BACK}, not {back_reaction!r}"
+            )
         from jaccpot import FusedForceProvider
         from jaccpot.escapers import eager_split_inputs
+        from jaccpot.runtime import target_points as tp
         from jaccpot.runtime.capacity_plan import eager_live_rows
 
         from nornax.hybrid_clusters import pad_galaxy
@@ -976,6 +1070,8 @@ class FusedClustersForce:
             coupling=coupling,
             group_size=int(group_size),
             headroom=float(headroom),
+            back_reaction=back_reaction,
+            back_options=None if back_options is None else dict(back_options),
         )
         if not reserve:
             gal, topo = FusedForceProvider.prepare(
@@ -989,12 +1085,15 @@ class FusedClustersForce:
             if gal.scale_carry:
                 if galaxy_aux is not None:
                     f_b_g = galaxy_aux[0]
-                    topo = jax.jit(lambda x, m, f: gal.rebuild(x, m, force_scale=f))(
-                        xg, mg, f_b_g
-                    )
                 else:
                     _, f_b_g = gal.accelerations(topo, force_scale=True)
-            plan_topo = topo
+            # plan from the sources (each round rebuilds in its own program):
+            # the eager topology goes first, as in FusedHybridForce.prepare --
+            # at 1e8 it left no room for the target program (HH2a)
+            del topo
+            gal.engine.clear_prepared_state_cache()
+            sources = tp.TargetSources(xg, mg, f_b_g)
+            sources2 = None
         else:
             f_b_g = None if galaxy_aux is None else galaxy_aux[0]
             boot = galaxy_solver
@@ -1015,7 +1114,9 @@ class FusedClustersForce:
                         .at[: int(n_live)]
                         .set(f0)
                     )
-                del gal0, topo0
+                del topo0
+                gal0.engine.clear_prepared_state_cache()
+                del gal0
             cubic = bool(
                 getattr(
                     galaxy_solver_engine(galaxy_solver), "_tree_cubic_bounds", False
@@ -1039,30 +1140,26 @@ class FusedClustersForce:
                 )
             if not gal.scale_carry:
                 f_b_g = None
-            topo_of = jax.jit(lambda x, m, n, f: _live_topology(gal, x, m, n, f))
-            plan_topo = topo_of(xg, mg, jnp.asarray(int(n_live), jnp.int32), f_b_g)
+            sources = _live_sources(xg, mg, int(n_live), f_b_g, cubic)
             f_plan = None
             if f_b_g is not None:
                 f_live = jnp.asarray(f_b_g)[: int(n_live)]
                 f_plan = jnp.concatenate(
                     [f_live, jnp.full((n_free,), jnp.median(f_live), f_live.dtype)]
                 )
-            plan_topo2 = topo_of(x_plan, m_plan, jnp.asarray(rows, jnp.int32), f_plan)
-        plan_s = gal.plan_targets(
-            plan_topo, pts, group_size=group_size, headroom=headroom
+            sources2 = _live_sources(x_plan, m_plan, rows, f_plan, cubic)
+        plan_s = tp.plan_target_points(
+            gal, sources, pts, group_size=group_size, headroom=headroom
         )
-        if reserve:
-            extra_s = gal.plan_targets(
-                plan_topo2, pts, group_size=group_size, headroom=headroom
+        if sources2 is not None:
+            extra_s = tp.plan_target_points(
+                gal, sources2, pts, group_size=group_size, headroom=headroom
             )
             plan_s = _summed(plan_s, extra_s)
-            del plan_topo2
         f_b_s = None
         if gal.scale_carry:
-            from jaccpot.runtime.target_points import bootstrap_target_force_scale
-
-            f_b_s, _ = bootstrap_target_force_scale(gal, plan_topo, pts, plan=plan_s)
-        del plan_topo
+            f_b_s, _ = tp.bootstrap_target_force_scale(gal, sources, pts, plan=plan_s)
+        del sources, sources2
         clu = plan_g = plan_cc = None
         back_eps = float(gal.engine.softening)
         if cross == "fmm" or coupling == "fmm":
@@ -1079,27 +1176,20 @@ class FusedClustersForce:
                     "rebuild carries no force scale here)"
                 )
             if cross == "fmm":
-                # sized for the evaluation layout (free rows on the last live
-                # point) PLUS the free rows among the clusters, where stripped
-                # stars arrive: the capacities are totals, so they add
-                n_free = rows - int(n_live)
-                plan_g = clu.plan_targets(
+                plan_g = _plan_back(
+                    clu,
                     ctopo,
-                    _back_targets(xg, int(n_live), clu) if n_free else xg,
-                    group_size=group_size,
-                    headroom=headroom,
+                    xg,
+                    mg,
+                    int(n_live),
+                    xc,
+                    mc,
+                    back_reaction=back_reaction,
+                    back_options=back_options,
+                    group_size=int(group_size),
+                    headroom=float(headroom),
                     softening=back_eps,
                 )
-                if n_free:
-                    planning, _ = _planning_rows(xg, mg, int(n_live), xc, mc)
-                    extra = clu.plan_targets(
-                        ctopo,
-                        planning,
-                        group_size=group_size,
-                        headroom=headroom,
-                        softening=back_eps,
-                    )
-                    plan_g = _summed(plan_g, extra)
             if coupling == "fmm":
                 plan_cc = clu.plan_targets(
                     ctopo,
@@ -1247,7 +1337,7 @@ class FusedClustersForce:
         """
         force, st = self.with_reserve(state, int(state.reserve))
         if failed is not None:
-            force = force._grown_from(failed.aux, st)
+            force = force._grown_from(failed.aux, st, failed=failed)
         aux_g, fb_s, ok, needs, aux_c = st.aux
 
         def cleared(a: Any) -> Any:
@@ -1268,8 +1358,16 @@ class FusedClustersForce:
             )
         )
 
-    def _grown_from(self, aux: Any, state: Any) -> "FusedClustersForce":
-        """The plans (and galaxy caps) grown to cover a failed segment's needs (eager)."""
+    def _grown_from(
+        self, aux: Any, state: Any, failed: Any = None
+    ) -> "FusedClustersForce":
+        """The plans (and galaxy caps) grown to cover a failed segment's needs (eager).
+
+        A failed back-reaction (``ok[1]``) of a ``BackReactionPlan`` may have
+        overflowed its inner capacity, which ``needs`` does not carry: with the
+        failed ``state`` the plan is also re-sized at its end positions and
+        merged in.
+        """
         headroom = float((self.setup or {}).get("headroom", 1.5))
         needs = np.asarray(aux[3]).reshape(3, 2)
         names = ("stars_plan", "galaxy_plan", "coupling_plan")
@@ -1278,6 +1376,13 @@ class FusedClustersForce:
             plan = getattr(self, name)
             if plan is not None and int(np.max(row)) > 0:
                 kw[name] = plan.grown(row, headroom)
+        back = kw.get("galaxy_plan", self.galaxy_plan)
+        if (
+            failed is not None
+            and hasattr(back, "inner")
+            and not bool(np.asarray(aux[2])[1])
+        ):
+            kw["galaxy_plan"] = _merged_back(back, self._back_plan_at(failed))
         out = dataclasses.replace(self, **kw) if kw else self
         aux_g = aux[0]
         if (
@@ -1295,6 +1400,29 @@ class FusedClustersForce:
         ):
             out = out._star_caps_grown(np.asarray(aux_c[1]), state)
         return out
+
+    def _back_plan_at(self, state: Any) -> Any:
+        """The back-reaction plan sized at ``state`` (eager)."""
+        setup = dict(self.setup or {})
+        dtype = jnp.asarray(state.galaxy_positions).dtype
+        xs, ms = self._star_slots(
+            state.clusters.positions, state.clusters.masses, dtype
+        )
+        ctopo = jax.jit(self.clusters.rebuild)(xs, ms)
+        return _plan_back(
+            self.clusters,
+            ctopo,
+            jnp.asarray(state.galaxy_positions),
+            jnp.asarray(state.galaxy_masses),
+            int(state.n_live),
+            state.clusters.positions,
+            state.clusters.masses,
+            back_reaction="auto",
+            back_options=setup.get("back_options"),
+            group_size=int(setup.get("group_size", 32)),
+            headroom=float(setup.get("headroom", 1.5)),
+            softening=float(self.back_softening),
+        )
 
     def _star_caps_grown(self, needs_c: Any, state: Any) -> "FusedClustersForce":
         """The star provider re-planned from its own tree's needs (jaccpot's retry)."""
@@ -1510,9 +1638,10 @@ class FusedClustersForce:
             ctopo = self.clusters.rebuild(xs, ms)
             back = self.clusters.target_field(
                 ctopo,
-                _back_targets(xg, n_live, self.clusters) if self.reserve else xg,
+                xg,
                 self.galaxy_plan,
                 softening=self.back_softening,
+                **self._back_extra(xg, n_live, xc, mc),
             )
             ok = ok.at[1].set(ok[1] & back.ok)
             ok, aux_c = self._star_tree_verdict(ctopo, ok, aux_c)
@@ -1526,6 +1655,15 @@ class FusedClustersForce:
             needs = needs.at[2].max(jnp.asarray(needs_cc, jnp.int32))
         a_c = jnp.asarray(a_c, jnp.asarray(xc).dtype).reshape(K, M, 3)
         return a_g, a_c, (aux_g, fb_s, ok, needs, aux_c)
+
+    def _back_extra(self, xg: Any, n_live: Any, xc: Any, mc: Any) -> dict:
+        """The back-reaction's ``point_mask`` (free rows) and ``groups`` (a grouped plan)."""
+        extra: dict = {}
+        if self.reserve:
+            extra["point_mask"] = _live_mask(xg.shape[0], n_live)
+        if int(getattr(self.galaxy_plan, "num_groups", 0) or 0) > 0:
+            extra["groups"] = _back_groups(xc, mc, xg.dtype)
+        return extra
 
     def _star_tree_verdict(self, ctopo: Any, ok: Any, aux_c: Any) -> tuple:
         """Fold the star tree's capacity verdict (``ok[2]``) and its bits/needs."""
