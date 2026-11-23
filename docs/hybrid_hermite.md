@@ -672,7 +672,7 @@ The 1e5 + 1e4 FMM run was not repeated with ferrers3 (GPU time, see the report).
   job would have come near its 90-minute cap, so it was split rather than raised.
 - No jaccpot change was needed.
 
-## 12. Session 3+ plan (not built)
+## 12. Session 3+ plan (session 3 built the scale parts of items 1 and 5: section 13)
 
 1. **Runner integration.** `ProductionRunner(scheme=HybridScheme(...))`:
    - the runner's force evaluation becomes `FusedClustersForce.cluster_slow_accelerations` (galaxy step + targets),
@@ -712,7 +712,9 @@ The 1e5 + 1e4 FMM run was not repeated with ferrers3 (GPU time, see the report).
      astropy units -> code units.
    - A demo notebook: Pal 5 (or a few GCs) forming streams in a 1e6-1e7-particle live MW.
    - A bundle of K ~ 150 GCs as the scaling case.
-5. **HoreKa timing** (`bench/slurm/hh/`, with HH2a's target-walk sbatch):
+5. **HoreKa timing** (`bench/slurm/hh/`, with HH2a's target-walk sbatch; session 3 prepared job `hh3` for the
+   slow step at K = 10 / 150 against the galaxy step, the back-reaction alone and `coupling="fmm"` vs `"none"`:
+   section 13; the internal sums, the transfer edge and a re-plan are not timed yet):
    - the slow step with K = 10-150 clusters against the galaxy step alone;
    - the internal Hermite sums at M = 1e3-1e5 per cluster;
    - the transfer edge (candidates, transfer, refresh) and a reserve re-plan;
@@ -752,3 +754,44 @@ scheme:
 - **Retry**: a failed back-reaction (`ok[1]`) may have overflowed its inner capacity, which `needs` does not carry;
   `replanned(start, failed=end)` re-sizes the back-reaction plan at the failed end state and merges it in
   (`BackReactionPlan.grown` covers the needs).
+
+**Gates (session 3).** Numbers from `mn-scratch/hh3a/` (scripts, runs, `REPORT.md`); GPU rows on contended local
+A100s (functional / accuracy / memory, no timings).
+
+| gate | result |
+|---|---|
+| K = 1 == `FusedHybridForce` `back_reaction="auto"` (fused lane, CPU route) | bitwise (`NORNAX_HYBRID_STRICT_BITWISE=1`); the test no longer passes `back_reaction="walk"` |
+| an unused reserve == none; a full reserve re-planned == a run started with the larger one | bitwise (strict), with the point mask |
+| `tests/integration/test_jaccpot_clusters.py` + `test_jaccpot_hybrid.py` | 11/11 strict, 16:47 wall at `-n 3`, peak RSS 4.4 GB |
+| the K-cluster back-reaction vs fp64 direct, 1e6 galaxy (jaccpot `## HH3a` gate 1) | K = 1: 1.76e-6 (HH2a 2.2e-6); K = 10 x 1e4: 9.8e-6 (p99.9 7.4e-5; the full walk 1.2e-5 / 4.8e-3); K = 150 x 1e3: 7.6e-6 (p99.9 2.0e-4; full walk 9.8e-6 / 1.3e-3) |
+| GPU 1e6 + 10 x 1e4 (section 11's gate-5 IC, 4 edges x 25 steps, reserve 4096) | verdicts ok; stripped 988 / 70 / 52 / 27 per edge and every cluster's membership **identical to session 2's gate 5**; `E - ledger` drift <= 4.4e-8, `|ΔP|` <= 5.7e-9; back-reaction vs fp64 3.9e-6 (p99.9 1.2e-4); device peak 1.85 GB (session 2: 2.05 GB); no re-plan |
+| GPU 1e8 + 10 x 1e4 (2 edges x 2 steps, reserve 4096; `XLA_PYTHON_CLIENT_ALLOCATOR=cuda_async`) | verdicts ok; 1329 + 32 stripped; `E - ledger` -7.6e-9 / 2.3e-8; `\|ΔP\|` <= 1.8e-10; back-reaction vs fp64 1.9e-6 (inner 5.7e6 rows); device peak: prepare 31.5 GB, segments 36.4 GB |
+| GPU 1e8 + 150 x 1e3 (radii 0.3-10, reserve 8192) | verdicts ok; 1180 + 48 stripped; `E - ledger` -4.5e-9 / 9.4e-9; `\|ΔP\|` <= 4.0e-10; back-reaction vs fp64 1.9e-5 (inner 2.07e7 rows, 21 %); device peak: prepare 31.5 GB, segments **39.15 GB** (~1.6 GB below the 0.95 pool) |
+
+**The coupling at scale** (`coupling="fmm"`, K = 150; Plummer `r_c` 3e-3, `eps_g` 0.02, ferrers3; vs fp64 direct
+pairs to the other clusters' stars on 3000 stars):
+
+| M | temporaries | device peak | needs (far / near) | rel-L2 | p99.9 |
+|---|---|---|---|---|---|
+| 1e3 | 43 MB (+12 MB own field) | 95 MB | 2.8e5 / 6.7e5 | 6.9e-4 | 6.1e-3 |
+| 1e4 | 527 MB (+201 MB own field) | 0.90 GB | 2.8e6 / 3.1e7 | 7.5e-4 | 8.2e-3 |
+
+Memory does not bind. The work does: at `eps_g >> r_c` every pair inside a cluster is a near pair of the star tree
+and is subtracted again exactly (`_own_field`), so the coupling costs `O(K M^2)` like the internal sums. HoreKa job
+`hh3` times it (`coupling_1e6_K150_1e4`, and `slow_*_fmm` minus `slow_*_none`); a grouped coupling (the other
+clusters' multipoles, as the back-reaction) is the lever if it binds.
+
+**HoreKa** (`jaccpot bench/slurm/hh/hybrid_clusters_timing.sbatch`, job `hh3` of the H1 bundle, nornax from the
+bundle's `H0_NORNAX_HH3_COMMIT`): the galaxy step at 1e8; the whole slow evaluation at K = 10 x 1e4 and 150 x 1e3,
+coupling `fmm` vs `none`; the back-reaction alone; the coupling alone at 150 x 1e3 / 1e4. Prepared, not run.
+
+**Physics choices (section 12 item 6)** are unchanged. Learned: the back-reaction's inner set is set by each
+cluster's FARTHEST member (`R_k`), i.e. by the stars a strip radius of 2 r_J has not yet removed; the first
+stripping edge shrinks it.
+
+**Memory at 1e8.** JAX's BFC pool (preallocated or not) failed the slow program's single 17.7-19.5 GiB temp
+allocation after the reserve prepare's 31.5 GB peak (fragmentation); `XLA_PYTHON_CLIENT_ALLOCATOR=cuda_async`
+passed. During the stripping segments the galaxy's state is resident twice (`run_segments` keeps a segment's start
+for the needs-driven retry): 13.9 GB. Levers if a production run needs room: a core / tail split of each cluster
+for the back-reaction (a smaller `R_k`, a smaller inner set), a retry from a checkpoint instead of a second state, a
+smaller inner headroom.
