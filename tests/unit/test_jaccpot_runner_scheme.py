@@ -467,3 +467,42 @@ def test_static_plans_round_trip_typed():
     with pytest.raises(TypeError):
         _plan_dict(object())
     assert _plan_dict(Inner())["f"] == {"a": 1, "s": "m2p"}
+
+
+def test_donated_segments_rerun_from_the_host_copy_bitwise():
+    """keep_start/restore_start: the start is consumed, a retry reruns it from its host copy."""
+    rs, state, masses = _rs()
+    want, _ = _drive(*_rs(), 3)
+    carry = rs.start(None, None, state, masses, dt=DT, t0=0.0, escapers=None)
+    for k in range(3):
+        start = carry
+        kept = rs.keep_start(start)
+        leaves = jax.tree_util.tree_leaves(start.state)
+        carry = rs.segment(start, DT, STEPS, donate=True)
+        # every array is consumed (a scalar the edge read on the host, n_live or
+        # the ledger, keeps a NumPy view and JAX then keeps it: 8 bytes)
+        assert all(
+            x.is_deleted() for x in leaves if isinstance(x, jax.Array) and x.ndim
+        )
+        if k == 1:  # a retry (the runner's path, no re-plan: the direct sum has
+            # no capacities) from the host copy, twice: the copy stays valid
+            for _ in range(2):
+                carry = rs.segment(rs.restore_start(kept), DT, STEPS, donate=True)
+        carry, _ = rs.edge(carry, index=k + 1, escapers_due=False, energy=False)
+    _same(carry.state, want.state)
+
+
+def test_restore_keeps_dtypes_weak_types_and_the_rest_of_the_carry():
+    rs, state, masses = _rs()
+    carry = rs.start(None, None, state, masses, dt=DT, t0=0.0, escapers=None)
+    carry = dataclasses.replace(
+        carry, state=carry.state._replace(time=jnp.asarray(0.25))
+    )  # a weak-typed leaf
+    back = rs.restore_start(rs.keep_start(carry))
+    _same(back.state, carry.state)
+    for a, b in zip(
+        jax.tree_util.tree_leaves(back.state), jax.tree_util.tree_leaves(carry.state)
+    ):
+        assert a.dtype == b.dtype
+        assert getattr(a, "weak_type", False) == getattr(b, "weak_type", False)
+    assert back.slow is carry.slow and back.n_galaxy == carry.n_galaxy

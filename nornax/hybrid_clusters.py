@@ -1469,11 +1469,16 @@ class _Programs:
 
     def __init__(self, scheme, slow, dt, steps, policy, record_fn):
         G_c, _ = _internal_constants(scheme)
-        self.segment = jax.jit(
-            lambda s: cluster_rollout(
+
+        def roll(s):
+            return cluster_rollout(
                 s, dt, scheme, slow, n_steps=steps, record_fn=record_fn
             )
-        )
+
+        self.segment = jax.jit(roll)
+        # the same program writing its end into its start's buffers (the runner's
+        # donated segments: one galaxy state on the device; compiled on first use)
+        self.segment_donated = jax.jit(roll, donate_argnums=0)
         self.candidates = (
             None
             if policy is None

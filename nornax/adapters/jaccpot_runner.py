@@ -829,12 +829,100 @@ class ClustersRunnerScheme:
         return carry
 
     # --------------------------------------------------------------- segments
-    def segment(self, carry: RunnerCarry, dt: float, steps: int) -> RunnerCarry:
-        """``steps`` slow steps (``jit(cluster_rollout)``; the input stays valid)."""
+    def segment(
+        self, carry: RunnerCarry, dt: float, steps: int, donate: bool = False
+    ) -> RunnerCarry:
+        """``steps`` slow steps (``jit(cluster_rollout)``).
+
+        Parameters
+        ----------
+        carry : RunnerCarry
+            The start.
+        dt : float
+            The slow step.
+        steps : int
+            Slow steps.
+        donate : bool
+            Consume ``carry.state`` (the same program, its end written into the
+            start's buffers; the runner keeps a host copy, :meth:`keep_start`). Otherwise
+            the input stays valid.
+
+        Returns
+        -------
+        RunnerCarry
+            The end.
+        """
         prog = self._progs(carry.slow, dt, steps)
+        run = prog.segment_donated if donate else prog.segment
         with self._pinned(carry):
-            st, _ = prog.segment(carry.state)
+            st, _ = run(carry.state)
         return dataclasses.replace(carry, state=st)
+
+    def keep_start(self, carry: RunnerCarry) -> tuple:
+        """A host copy of ``carry``'s state, for a segment that will consume it.
+
+        On a GPU an asynchronous copy into pinned host memory (jaccpot's
+        ``host_copy``: ~0.1 s per 2.4 GB on an A100, overlapped with the segment
+        that consumes the state); elsewhere a NumPy copy of a device-side copy
+        (``device_get`` of the state itself would leave a zero-copy NumPy view on
+        it, and JAX then silently refuses the donation). :meth:`restore_start` puts it
+        back bitwise (shardings and weak types kept).
+
+        Parameters
+        ----------
+        carry : RunnerCarry
+            The segment's start.
+
+        Returns
+        -------
+        tuple
+            ``(carry without its state, treedef, leaves)``.
+        """
+        from jaccpot.runtime.strict_carry import host_copy
+
+        def copy(x: Any) -> Any:
+            if all(d.platform == "gpu" for d in x.devices()):
+                return host_copy(x)  # pinned_host where the device has it
+            return np.asarray(jax.device_get(jnp.copy(x)))
+
+        leaves, treedef = jax.tree_util.tree_flatten(carry.state)
+        kept = [
+            (
+                (copy(x), x.sharding, bool(getattr(x, "weak_type", False)))
+                if isinstance(x, jax.Array)
+                else (x, None, False)
+            )
+            for x in leaves
+        ]
+        return dataclasses.replace(carry, state=None), treedef, kept
+
+    def restore_start(self, kept: tuple) -> RunnerCarry:
+        """The carry :meth:`keep_start` copied, back on its devices, bitwise.
+
+        Parameters
+        ----------
+        kept : tuple
+            :meth:`keep_start`'s result (still valid afterwards: a second retry
+            restores it again).
+
+        Returns
+        -------
+        RunnerCarry
+            The segment's start.
+        """
+        carry, treedef, leaves = kept
+        out = []
+        for value, sharding, weak in leaves:
+            if sharding is None:
+                out.append(value)
+                continue
+            arr = jax.device_put(value, sharding)
+            if weak and not getattr(arr, "weak_type", False):
+                arr = _weak(arr)
+            out.append(arr)
+        return dataclasses.replace(
+            carry, state=jax.tree_util.tree_unflatten(treedef, out)
+        )
 
     def verdict(self, carry: RunnerCarry) -> list:
         """The parts whose static capacities overflowed (empty: the segment fitted)."""
