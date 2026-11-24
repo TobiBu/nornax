@@ -88,7 +88,9 @@ __all__ = [
     "decompose_clusters",
     "gather_galaxy",
     "mesh_edge",
+    "migrate_start",
     "run_mesh_segments",
+    "start_mesh",
     "stack_local",
     "unstack_local",
 ]
@@ -1145,6 +1147,46 @@ def decompose_clusters(
     return jax.tree_util.tree_map(lambda a: jax.device_put(a, sh), ms)
 
 
+def migrate_start(
+    layout: MeshLayout,
+    scheme: ClusterHybridHermite,
+    partition: Any,
+    raw: MeshClusterState,
+) -> MeshClusterState:
+    """The start's rows to their owners: the galaxy's partition, the clusters' centres.
+
+    Parameters
+    ----------
+    layout : MeshLayout
+        The layout.
+    scheme : ClusterHybridHermite
+        The scheme.
+    partition : Any
+        The partition.
+    raw : MeshClusterState
+        :func:`decompose_clusters`'s (no force values yet).
+
+    Returns
+    -------
+    MeshClusterState
+        Migrated.
+
+    Raises
+    ------
+    RuntimeError
+        If the migration overflows (rows or slots too small).
+    """
+    ms, flags, _ = mesh_programs(layout, scheme, None, partition, None).migrate(raw)
+    flags = np.asarray(flags).all(0)
+    if not flags.all():
+        raise RuntimeError(
+            "the start's migration overflowed "
+            + ", ".join(p for p, f in zip(_MIGRATION_PARTS, flags) if not f)
+            + f": rows {layout.rows}, slots {layout.slots} per device"
+        )
+    return ms
+
+
 def start_mesh(
     layout: MeshLayout,
     scheme: ClusterHybridHermite,
@@ -1187,15 +1229,7 @@ def start_mesh(
     if migrate is None:
         migrate = layout.ndev > 1
     if migrate:
-        ms, flags, _ = mesh_programs(layout, scheme, slow, partition, None).migrate(raw)
-        flags = np.asarray(flags)
-        if not flags.all():
-            raise RuntimeError(
-                "the start's migration overflowed "
-                + ", ".join(p for p, f in zip(_MIGRATION_PARTS, flags.all(0)) if not f)
-                + f": rows {layout.rows}, slots {layout.slots} per device"
-            )
-        raw = ms
+        raw = migrate_start(layout, scheme, partition, raw)
     key = ("initial", layout.key(), id(scheme), id(slow))
     prog = _PROGRAMS.get(key)
     if prog is None:
