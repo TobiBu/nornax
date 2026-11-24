@@ -989,15 +989,15 @@ noted; scripts and logs `mn-scratch/hh4c/{scripts,runs}`.
 | 2. direct reference, 2 and 4 devices vs one card (6 segments, stripping) | max \|dx\| 1.1e-16, membership identical, \|dP\| 3e-17 / 4e-17, E_ledgered equal to 1e-16 |
 | 2. a cluster crossing a fixed domain boundary (2 devices, `SlabPartition(axis=1, cuts=(0.05,))` vs `(50,)`) | it moves 0 -> 1 at edge 2 as one block; the run is **bitwise** the one on the partition it never crosses |
 | 2. fused mesh lane, 2 devices (Plummer 2048 + 3 x 32 x1.5, `MortonPartition`, the mesh CPU route of jaccpot's mesh tests, geometric theta 0.8, coupling direct, 4 x 2 steps) | at the SAME start positions vs fp64 direct: stars 2.2e-3 (one card 2.7e-3), galaxy 2.9e-3 (2.7e-3); mesh vs card 2.5e-3 / 3.6e-3. Membership identical at the first stripping edge (34); one threshold star flips at the next (59 / 58), force-error-level orbits. Ledgered drift max 5.2e-6 (card 3.6e-6), momentum drift max 2.6e-8 (3.4e-8); cluster 1 migrated to device 1 at edge 1; no retries |
-| 2. fused mesh lane, 4 devices (the same system) | at the start: stars 2.2e-3 vs direct, galaxy 2.9e-3; mesh vs card 2.5e-3 / 3.6e-3; membership as on 2 devices; momentum drift max 2.5e-8 (card 3.4e-8); clusters on devices 1, 2, 1. The ledgered energy by fp64 DIRECT sums of the same states (the lane's Hamiltonian): drift 3.0e-7 at the end (card 3.6e-7), edge by edge in class. The runner's FMM energy DIAGNOSTIC jumps -1.8e-5 at the first stripping edge and stays flat (card 3.6e-6, 2 devices 5.2e-6): a diagnostic offset of the mesh potential at the stripped stars' rows, not the trajectory (open) |
+| 2. fused mesh lane, 4 devices (the same system) | at the start: stars 2.2e-3 vs direct, galaxy 2.9e-3; mesh vs card 2.5e-3 / 3.6e-3; membership as on 2 devices; momentum drift max 2.5e-8 (card 3.4e-8); clusters on devices 1, 2, 1. The ledgered energy by fp64 DIRECT sums of the same states (the lane's Hamiltonian): drift 3.0e-7 at the end (card 3.6e-7), edge by edge in class. The runner's FMM energy DIAGNOSTIC jumps -1.8e-5 at the first stripping edge and stays flat (card 3.6e-6, 2 devices 5.2e-6): term by term against fp64 direct, all of it is `W_gg`, jaccpot's mesh potential of the galaxy rows (FMM - direct -3.0e-6 at the start, -5.8e-6 after the edge; one card -1.6e-6), within that potential's validated W accuracy; `W_gc` and `W_cc_inter` (this session's terms) are within 5e-7 |
 | 3. fused mesh lane, 2 devices: orbax per edge, FRESH-process resume at edge 2 | **0 / 23 arrays differ**, `restored["bitwise"]` |
 | 2. fused mesh lane, 2 devices, x4-inflated (all stars leave by edge 2) | galaxy rel-L2 vs card 8.5e-4, membership identical (76 / 96), ledgered drift <= 1.3e-6 (card 1.9e-6), momentum 9.4e-10 (1.6e-9) |
 | 3. orbax checkpoint per edge, FRESH-process resume at edges 1 and 2 (23 stars stripped at edge 1) | **0 / 19 arrays differ**, `restored["bitwise"]`, no mismatches: direct reference at 2 and 4 devices; fused at 1 device |
 | default path | jaccpot `provider_hlo_identity compare w8-main-cpu hh4c-tip-cpu` PASS 36/36 |
 
-**Open.** On 4 devices the runner's FMM energy diagnostic is offset by ~1e-5 after the first stripping edge while
-fp64 direct energies of the same states conserve `E - ledger` as one card does: look at the mesh potential
-(`FusedMeshForce.potential_shard` + the star potentials) at the rows of freshly stripped stars.
+**Learned.** The energy diagnostic on the mesh carries jaccpot's mesh potential's `W_gg` error (geometric MAC: a few
+1e-6 absolute here, more than one card's), which moves when stripped stars join the tree rows; judge `E - ledger`
+on the mesh against that, or by a direct-sum energy for small systems (`hh4c/scripts/energy_direct.py`).
 
 **Not in session 4.** Escapers with the clusters on the mesh (refused), a restart on another device count (refused,
 planned above), sending the star block only to the ranks within `r_in` (all-gather today), donated mesh segments (the
