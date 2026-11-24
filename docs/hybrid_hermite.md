@@ -978,6 +978,21 @@ pinned trace-time state. A restart on the SAME device count restores every array
 is refused with a clear error; the plan for it: gather by id, re-decompose (`decompose_clusters`) and re-assign by
 centre of mass (`migrate_start`), as a fresh start.
 
+**Gates (session 4).** CPU on this host (EPYC 7452, loaded ~100), forced host devices, JAX 0.11.2, float64 unless
+noted; scripts and logs `mn-scratch/hh4c/{scripts,runs}`.
+
+| gate | result |
+|---|---|
+| 1. one-device mesh == the single-card runner (fused lane; the HH2b system 512 + 3 x 32 x4-inflated, galaxy preset CPU route, coupling direct, reserve 1) | **bitwise**: 23 / 23 state leaves and every diagnostics row (96 stripped; reserve re-plans 1 -> 79 -> 158); `test_jaccpot_mesh.py::test_one_device...` strict-bitwise PASS (15 min) |
+| 1. the same with the direct reference force (`ClustersRunnerScheme` vs `MeshClustersRunnerScheme`, through jaccpot's runner) | bitwise, every row (96 stripped) |
+| single card unchanged (`run_segments` + stripping, nornax main 83b67c4 vs this branch) | 0 / 17 leaves differ |
+| 2. direct reference, 2 and 4 devices vs one card (6 segments, stripping) | max \|dx\| 1.1e-16, membership identical, \|dP\| 3e-17 / 4e-17, E_ledgered equal to 1e-16 |
+| 2. a cluster crossing a fixed domain boundary (2 devices, `SlabPartition(axis=1, cuts=(0.05,))` vs `(50,)`) | it moves 0 -> 1 at edge 2 as one block; the run is **bitwise** the one on the partition it never crosses |
+| 2. fused mesh lane, 2 devices (Plummer 2048 + 3 x 32 x1.5, `MortonPartition`, the mesh CPU route of jaccpot's mesh tests, geometric theta 0.8, coupling direct, 4 x 2 steps) | at the SAME start positions vs fp64 direct: stars 2.2e-3 (one card 2.7e-3), galaxy 2.9e-3 (2.7e-3); mesh vs card 2.5e-3 / 3.6e-3. Membership identical at the first stripping edge (34); one threshold star flips at the next (59 / 58), force-error-level orbits. Ledgered drift max 5.2e-6 (card 3.6e-6), momentum drift max 2.6e-8 (3.4e-8); cluster 1 migrated to device 1 at edge 1; no retries |
+| 2. fused mesh lane, 2 devices, x4-inflated (all stars leave by edge 2) | galaxy rel-L2 vs card 8.5e-4, membership identical (76 / 96), ledgered drift <= 1.3e-6 (card 1.9e-6), momentum 9.4e-10 (1.6e-9) |
+| 3. orbax checkpoint per edge, FRESH-process resume at edges 1 and 2 (23 stars stripped at edge 1) | **0 / 19 arrays differ**, `restored["bitwise"]`, no mismatches: direct reference at 2 and 4 devices; fused at 1 device |
+| default path | jaccpot `provider_hlo_identity compare w8-main-cpu hh4c-tip-cpu` PASS 36/36 |
+
 **Not in session 4.** Escapers with the clusters on the mesh (refused), a restart on another device count (refused,
 planned above), sending the star block only to the ranks within `r_in` (all-gather today), donated mesh segments (the
 mesh path keeps a segment's start on the devices for the retry: no `keep_start` yet), GPU timing (HoreKa).
