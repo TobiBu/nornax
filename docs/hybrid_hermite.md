@@ -859,5 +859,19 @@ the loop). Any `ClusterSlowForce` works through `slow_factory=` (the unit tests 
 both ledgers, a planned force's verdicts and re-plans) and `tests/integration/test_jaccpot_runner.py` (the fused lane
 through jaccpot's runner; CI job `solver-tests-runner`, skipped until the jaccpot pin has `jaccpot.carried`).
 
+**Retry from a host copy (2026-11-24).** `ClustersRunnerScheme` implements jaccpot's optional
+`keep_start`/`restore_start`. The runner donates each segment's start (`_Programs.segment_donated`, which is
+`jit(cluster_rollout, donate_argnums=0)`) and keeps a host copy for the rare retry, so one galaxy state is on the device,
+not two. `keep_start` copies every state leaf with its sharding and weak type: on a GPU into pinned memory
+(asynchronous), on CPU as a device copy pulled to NumPy. A plain `device_get` returns a zero-copy view on CPU, and JAX
+then silently refuses the donation. `restore_start` puts the copy back bitwise.
+
+At 1e8 + 150 x 1e3 (HH3a's gate-4 system, one A100, one retry forced):
+- device in use at an edge: 10.34 GB, against 13.97 GB with the start kept;
+- the run peaked at 38.26 GB, including an edge's full 1e8 re-plan;
+- the retry reran from the host copy with the ledger in class.
+
+Details are in jaccpot `docs/production_2026-11.md` `## HH3b`. Test: `test_donated_segments_rerun_from_the_host_copy_bitwise`.
+
 **Not in session 3**: the mesh (the runner refuses the clusters there), Aarseth steps, the GC science layer, HoreKa
 timing, the physics choices (today's defaults).
