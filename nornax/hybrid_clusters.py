@@ -1207,7 +1207,42 @@ def tidal_tensor(x: Any, m: Any, a: Any) -> tuple[Any, Any, Any, Any]:
     return X, A, 0.5 * (T + T.T), M
 
 
-def jacobi_radii(state: ClusterHybridState, G: float, policy: StrippingPolicy) -> dict:
+def galaxy_centre_sums(state: ClusterHybridState) -> tuple[Any, Any, Any]:
+    """``(sum m, sum m x, sum m v)`` over the galaxy particles' rows (wide; traced).
+
+    The live rows without the stripped stars: the centre :func:`jacobi_radii`
+    takes ``Omega`` about. On the mesh each device sums its own rows and the sums
+    are reduced over the mesh (``nornax.hybrid_mesh``) before the division.
+
+    Parameters
+    ----------
+    state : ClusterHybridState
+        The state (one device's rows on the mesh).
+
+    Returns
+    -------
+    tuple[Any, Any, Any]
+        The mass, the mass moment ``[3]`` and the momentum ``[3]``.
+    """
+    w = _wide()
+    mg = jnp.asarray(state.galaxy_masses, w)
+    live = _rows_live(mg.shape[0], state.n_live) & (
+        jnp.asarray(state.galaxy_star_id) < 0
+    )
+    mg = jnp.where(live, mg, 0.0)
+    return (
+        jnp.sum(mg),
+        jnp.sum(mg[:, None] * jnp.asarray(state.galaxy_positions, w), 0),
+        jnp.sum(mg[:, None] * jnp.asarray(state.galaxy_velocities, w), 0),
+    )
+
+
+def jacobi_radii(
+    state: ClusterHybridState,
+    G: float,
+    policy: StrippingPolicy,
+    centre_sums: tuple | None = None,
+) -> dict:
     """Every cluster's Jacobi radius (traced).
 
     ``r_J = (G M / lambda_eff)^(1/3)``, ``lambda_eff`` the largest eigenvalue of
@@ -1223,6 +1258,9 @@ def jacobi_radii(state: ClusterHybridState, G: float, policy: StrippingPolicy) -
         The cluster's gravitational constant.
     policy : StrippingPolicy
         The policy.
+    centre_sums : tuple | None
+        :func:`galaxy_centre_sums` reduced over the whole system (the mesh);
+        ``None``: this state's own.
 
     Returns
     -------
@@ -1237,14 +1275,10 @@ def jacobi_radii(state: ClusterHybridState, G: float, policy: StrippingPolicy) -
     V = jnp.sum(m[..., None] * jnp.asarray(cl.velocities, w), 1) / Ms[:, None]
     lam = jnp.linalg.eigvalsh(T)[:, -1]
     if policy.centre is None:
-        mg = jnp.asarray(state.galaxy_masses, w)
-        live = _rows_live(mg.shape[0], state.n_live) & (
-            jnp.asarray(state.galaxy_star_id) < 0
-        )
-        mg = jnp.where(live, mg, 0.0)
-        Mg = jnp.maximum(jnp.sum(mg), jnp.finfo(w).tiny)
-        Xc = jnp.sum(mg[:, None] * jnp.asarray(state.galaxy_positions, w), 0) / Mg
-        Vc = jnp.sum(mg[:, None] * jnp.asarray(state.galaxy_velocities, w), 0) / Mg
+        sums = galaxy_centre_sums(state) if centre_sums is None else centre_sums
+        Mg = jnp.maximum(sums[0], jnp.finfo(w).tiny)
+        Xc = sums[1] / Mg
+        Vc = sums[2] / Mg
     else:
         Xc = jnp.asarray(policy.centre, w)
         Vc = jnp.zeros((3,), w)
@@ -1262,7 +1296,10 @@ def jacobi_radii(state: ClusterHybridState, G: float, policy: StrippingPolicy) -
 
 
 def strip_candidates(
-    state: ClusterHybridState, G: float, policy: StrippingPolicy
+    state: ClusterHybridState,
+    G: float,
+    policy: StrippingPolicy,
+    centre_sums: tuple | None = None,
 ) -> tuple[Any, Any, dict]:
     """Which stars leave now (traced): ``(take [K, M], dwell [K, M], radii)``.
 
@@ -1279,13 +1316,15 @@ def strip_candidates(
         The clusters' gravitational constant.
     policy : StrippingPolicy
         The policy.
+    centre_sums : tuple | None
+        As :func:`jacobi_radii` (the mesh's reduced galaxy centre).
 
     Returns
     -------
     tuple[Any, Any, dict]
         The transfer mask, the new dwell counters and :func:`jacobi_radii`.
     """
-    radii = jacobi_radii(state, G, policy)
+    radii = jacobi_radii(state, G, policy, centre_sums)
     cl = state.clusters
     filled = cl.masses > 0
     d = jnp.linalg.norm(
