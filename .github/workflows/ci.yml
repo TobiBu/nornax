@@ -63,11 +63,12 @@ jobs:
   # jaccpot and yggdrax from GitHub at PINNED commits and runs those tests on CPU in
   # float64 (the fused-lane files run their Pallas kernels in interpret mode).
   #
-  # PINS: jaccpot main a725c19a (2026-11-23, #525's merge: the grouped
-  # back-reaction SourceGroups, point_mask and TargetSources live rows, which
-  # FusedClustersForce uses; it also has #524's carried-scheme seam for the
-  # clusters runner tests) and yggdrax ba82e37 (#110, the Pallas walk move; it has
-  # everything jaccpot main imports). Bump them together: jaccpot's
+  # PINS: jaccpot main e7797c75 (2026-11-24, #527's merge: the carried runner's
+  # donated segments and host-copy retry, which ClustersRunnerScheme's
+  # keep_start/restore_start serve; it has #525's grouped back-reaction
+  # SourceGroups, point_mask and TargetSources live rows, which FusedClustersForce
+  # uses, and #524's carried-scheme seam) and yggdrax ba82e37 (#110, the Pallas
+  # walk move; it has everything jaccpot main imports). Bump them together: jaccpot's
   # `yggdrax>=0.0.1` and jax window (>=0.11.2,<0.12) are what the resolver
   # reconciles.
   solver-tests:
@@ -77,7 +78,7 @@ jobs:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
       YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: a725c19abfe2306589d472535d52ba4b96f50e53
+      JACCPOT_REF: e7797c75c63bac164321257224e68a5db3022bfe
 
     steps:
       - name: Checkout
@@ -120,7 +121,7 @@ jobs:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
       YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: a725c19abfe2306589d472535d52ba4b96f50e53
+      JACCPOT_REF: e7797c75c63bac164321257224e68a5db3022bfe
 
     steps:
       - name: Checkout
@@ -158,7 +159,7 @@ jobs:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
       YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: a725c19abfe2306589d472535d52ba4b96f50e53
+      JACCPOT_REF: e7797c75c63bac164321257224e68a5db3022bfe
 
     steps:
       - name: Checkout
