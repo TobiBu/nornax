@@ -829,7 +829,9 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
             "galaxy_plan": _plan_dict(self.galaxy_plan),
             "coupling_plan": _plan_dict(self.coupling_plan),
             "cross_caps": (
-                None if caps is None else {k: int(v) for k, v in vars(caps).items()}
+                None
+                if caps is None
+                else {k: (None if v is None else int(v)) for k, v in vars(caps).items()}
             ),
             "level_floor": (
                 None
