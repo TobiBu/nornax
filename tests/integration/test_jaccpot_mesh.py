@@ -28,10 +28,6 @@ import numpy as np
 import pytest
 
 pytest.importorskip("jaccpot")
-pytest.importorskip(
-    "jaccpot.distributed.clusters_mesh",
-    reason="jaccpot without the clusters' mesh (HH4c)",
-)
 
 from jaccpot.production import ProductionRunner  # noqa: E402
 from jax.sharding import Mesh  # noqa: E402
@@ -43,6 +39,15 @@ from nornax.adapters.jaccpot_runner import ClustersRunnerScheme  # noqa: E402
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 import _jaccpot_mesh_cases as cases  # noqa: E402
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _mesh_seam():
+    """Skip (per test: the job collects them) until the jaccpot pin has HH4c."""
+    pytest.importorskip(
+        "jaccpot.distributed.clusters_mesh",
+        reason="jaccpot without the clusters' mesh (HH4c)",
+    )
 
 
 @pytest.fixture(scope="module", autouse=True)
