@@ -75,12 +75,7 @@ def decode_stacked(arrays: dict, spec: Any) -> Any:
     Returns
     -------
     Any
-        The pytree.
-
-    Raises
-    ------
-    ValueError
-        For a NamedTuple outside nornax / jaccpot.
+        The pytree (a NamedTuple outside nornax / jaccpot is a ``ValueError``).
     """
 
     def dec(node: Any) -> Any:
@@ -89,7 +84,11 @@ def decode_stacked(arrays: dict, spec: Any) -> Any:
         if "a" in node:
             got = arrays[node["a"]]
             if isinstance(got, jax.Array):
-                arr = got.astype(node["dtype"]) if str(got.dtype) != node["dtype"] else got
+                arr = (
+                    got.astype(node["dtype"])
+                    if str(got.dtype) != node["dtype"]
+                    else got
+                )
             else:
                 arr = jnp.asarray(np.asarray(got), node["dtype"])
             return _weak(arr) if node.get("weak") else arr
@@ -263,7 +262,9 @@ class MeshClustersRunnerScheme:
         return MeshLayout(mesh, rows=rows, slots=slots, axis_name=self.axis_name)
 
     def _partition(self, slow: Any) -> Any:
-        return self.partition if self.partition is not None else _default_partition(slow)
+        return (
+            self.partition if self.partition is not None else _default_partition(slow)
+        )
 
     @staticmethod
     def _pinned(carry: MeshCarry) -> Any:
@@ -378,7 +379,9 @@ class MeshClustersRunnerScheme:
             layout, (xg, vg, mg), self.clusters, self.star_id, time=float(t0)
         )
         part0 = self.partition if self.partition is not None else None
-        slow, aux = self._factory()(self, solver, settings, layout, raw, partition=part0)
+        slow, aux = self._factory()(
+            self, solver, settings, layout, raw, partition=part0
+        )
         partition = self._partition(slow)
         if layout.ndev > 1:
             raw = migrate_start(layout, self.scheme, partition, raw)
@@ -439,7 +442,9 @@ class MeshClustersRunnerScheme:
         if _fits(carry.slow, carry.ms):
             return []
         why = getattr(carry.slow, "reasons", None)
-        return list(why(carry.ms.state.aux)) if why is not None else ["slow force verdict"]
+        return (
+            list(why(carry.ms.state.aux)) if why is not None else ["slow force verdict"]
+        )
 
     def replanned(self, start: MeshCarry, failed: MeshCarry) -> MeshCarry:
         """``start`` with the force grown to what ``failed`` needed.
@@ -564,7 +569,11 @@ class MeshClustersRunnerScheme:
             Mass, momenta, mass moment, kinetic energy, momentum scale.
         """
         progs = mesh_programs(
-            carry.layout, self.scheme, carry.slow, self._partition(carry.slow), self.policy
+            carry.layout,
+            self.scheme,
+            carry.slow,
+            self._partition(carry.slow),
+            self.policy,
         )
         if getattr(carry.slow, "delegates", False):
             from nornax.adapters.jaccpot_runner import _moments_fn
@@ -588,7 +597,11 @@ class MeshClustersRunnerScheme:
             :func:`~nornax.hybrid_mesh.mesh_energy`.
         """
         progs = mesh_programs(
-            carry.layout, self.scheme, carry.slow, self._partition(carry.slow), self.policy
+            carry.layout,
+            self.scheme,
+            carry.slow,
+            self._partition(carry.slow),
+            self.policy,
         )
         K = int(np.shape(self.clusters[2])[0])
         with self._pinned(carry):
@@ -768,7 +781,13 @@ class MeshClustersRunnerScheme:
         ms = decode_stacked(placed, meta["spec"])
         part0 = self.partition if self.partition is not None else None
         slow, _ = self._factory()(
-            self, solver, settings, layout, ms, partition=part0, restore=meta.get("force")
+            self,
+            solver,
+            settings,
+            layout,
+            ms,
+            partition=part0,
+            restore=meta.get("force"),
         )
         bad = getattr(slow, "restore_mismatches", None)
         if bad:

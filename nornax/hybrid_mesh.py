@@ -428,9 +428,10 @@ def cluster_centres(state: ClusterHybridState) -> tuple[Any, Any]:
     cl = state.clusters
     m = jnp.asarray(cl.masses, w)
     M = jnp.sum(m, axis=1)
-    com = jnp.sum(m[..., None] * jnp.asarray(cl.positions, w), axis=1) / jnp.where(
-        M > 0, M, 1.0
-    )[:, None]
+    com = (
+        jnp.sum(m[..., None] * jnp.asarray(cl.positions, w), axis=1)
+        / jnp.where(M > 0, M, 1.0)[:, None]
+    )
     return com, M > 0
 
 
@@ -640,7 +641,9 @@ class DirectMeshClustersForce:
     def _gathered(self, x: Any, m: Any, live: Any, extra: Any = None) -> tuple:
         ax = self.axis_name
         xa = jax.lax.all_gather(x, ax, tiled=True)
-        ma = jax.lax.all_gather(jnp.where(live, m, jnp.zeros((), m.dtype)), ax, tiled=True)
+        ma = jax.lax.all_gather(
+            jnp.where(live, m, jnp.zeros((), m.dtype)), ax, tiled=True
+        )
         la = jax.lax.all_gather(live, ax, tiled=True)
         perm = _canonical(xa, la)
         ea = None if extra is None else jax.lax.all_gather(extra, ax, tiled=True)[perm]
@@ -732,7 +735,9 @@ class DirectMeshClustersForce:
             The slow accelerations and ``aux``.
         """
         if self.delegates:
-            return self.inner.cluster_slow_accelerations(xg, mg, n_live, xc, mc, aux=aux)
+            return self.inner.cluster_slow_accelerations(
+                xg, mg, n_live, xc, mc, aux=aux
+            )
         a_g, _, a_c, _, _ = self.fields(xg, mg, n_live, xc, mc, False)
         if xc is not None:
             a_c = jnp.asarray(a_c, jnp.asarray(xc).dtype)
@@ -826,16 +831,26 @@ def _uses_single_card(slow: Any) -> bool:
 class MeshPrograms:
     """The jitted mesh programs of one (layout, scheme, slow force, dt, steps).
 
-    Attributes
+    ``segment`` / ``segment_donated`` (``steps`` slow steps, ``cluster_rollout`` on
+    every device), ``candidates``, ``transfer``, ``refresh``, ``migrate`` (the
+    edge's, :func:`mesh_edge`), ``moments`` and ``energy_parts`` (diagnostics).
+
+    Parameters
     ----------
     layout : MeshLayout
         The layout.
-    segment : Callable
-        ``steps`` slow steps (``cluster_rollout`` on every device).
-    segment_donated : Callable
-        The same, its start donated.
-    candidates, transfer, refresh, migrate, moments, energy_parts : Callable
-        The edge and diagnostics programs (see :func:`mesh_edge`).
+    scheme : ClusterHybridHermite
+        The scheme.
+    slow : Any
+        The mesh slow force.
+    partition : Any
+        The galaxy's partition.
+    policy : StrippingPolicy | None
+        Stripping.
+    dt : float
+        The slow step.
+    steps : int
+        Steps per segment.
     """
 
     def __init__(
@@ -892,9 +907,7 @@ class MeshPrograms:
             x, m, n_live, moved, cuts, ok_g = partition.repartition(
                 st.galaxy_positions, st.galaxy_masses, st.n_live, payload, axis_name=ax
             )
-            aux = _with_row_aux(
-                slow, st.aux, {k: moved["aux_" + k] for k in rows_aux}
-            )
+            aux = _with_row_aux(slow, st.aux, {k: moved["aux_" + k] for k in rows_aux})
             st = st._replace(
                 galaxy_positions=x,
                 galaxy_velocities=moved["v"],
@@ -1033,7 +1046,9 @@ def mesh_programs(
     if hit is None:
         hit = _PROGRAMS[key] = (
             (scheme, slow, partition, layout),
-            MeshPrograms(layout, scheme, slow, partition, policy, float(dt), int(steps)),
+            MeshPrograms(
+                layout, scheme, slow, partition, policy, float(dt), int(steps)
+            ),
         )
     return hit[1]
 
@@ -1220,11 +1235,6 @@ def start_mesh(
     -------
     MeshClusterState
         With internal derivatives, slow accelerations and ``aux``.
-
-    Raises
-    ------
-    RuntimeError
-        If the first migration overflows (rows or slots too small).
     """
     if migrate is None:
         migrate = layout.ndev > 1
@@ -1240,9 +1250,7 @@ def start_mesh(
             a_g, a_c, aux_out = scheme._slow(
                 slow, st.galaxy_positions, st.galaxy_masses, st.n_live, cl, aux_in
             )
-            st = st._replace(
-                clusters=cl, galaxy_acc=a_g, cluster_acc=a_c, aux=aux_out
-            )
+            st = st._replace(clusters=cl, galaxy_acc=a_g, cluster_acc=a_c, aux=aux_out)
             return ms._replace(state=st)
 
         prog = _PROGRAMS[key] = ((scheme, slow), layout.program(initial, 2))
@@ -1290,7 +1298,9 @@ def grow_rows(ms: MeshClusterState, rows: int, slow: Any = None) -> MeshClusterS
         galaxy_star_id=pad(st.galaxy_star_id),
         aux=aux,
     )
-    return MeshClusterState(state=st, galaxy_id=pad(ms.galaxy_id), cluster_id=ms.cluster_id)
+    return MeshClusterState(
+        state=st, galaxy_id=pad(ms.galaxy_id), cluster_id=ms.cluster_id
+    )
 
 
 def grow_slots(ms: MeshClusterState, slots: int, slow: Any = None) -> MeshClusterState:
@@ -1323,9 +1333,11 @@ def grow_slots(ms: MeshClusterState, slots: int, slow: Any = None) -> MeshCluste
         a = jnp.asarray(a)
         f = _fill_like(a) if fill is None else fill
         tail = jnp.broadcast_to(
-            jnp.asarray(f, a.dtype).reshape((-1,) + (1,) * (a.ndim - 1))
-            if jnp.ndim(f)
-            else jnp.asarray(f, a.dtype),
+            (
+                jnp.asarray(f, a.dtype).reshape((-1,) + (1,) * (a.ndim - 1))
+                if jnp.ndim(f)
+                else jnp.asarray(f, a.dtype)
+            ),
             (a.shape[0], add) + a.shape[2:],
         )
         return jnp.concatenate([a, tail], axis=1)
@@ -1349,7 +1361,9 @@ def grow_slots(ms: MeshClusterState, slots: int, slow: Any = None) -> MeshCluste
         star_id=pad(st.star_id),
         aux=aux,
     )
-    return MeshClusterState(state=st, galaxy_id=ms.galaxy_id, cluster_id=pad(ms.cluster_id))
+    return MeshClusterState(
+        state=st, galaxy_id=ms.galaxy_id, cluster_id=pad(ms.cluster_id)
+    )
 
 
 def gather_galaxy(ms: MeshClusterState, n_galaxy: int) -> tuple:
@@ -1366,6 +1380,11 @@ def gather_galaxy(ms: MeshClusterState, n_galaxy: int) -> tuple:
     -------
     tuple
         NumPy arrays by the caller's row.
+
+    Raises
+    ------
+    RuntimeError
+        If a galaxy row was lost or claimed twice.
     """
     st = ms.state
     gid = np.asarray(jax.device_get(ms.galaxy_id)).reshape(-1)
@@ -1500,14 +1519,18 @@ def mesh_energy(
         n_live, n_stripped, bound_mass [K]``.
     """
     if _uses_single_card(slow):
-        out = dict(slow.energy(jax.tree_util.tree_map(lambda a: a[0], ms.state), scheme))
+        out = dict(
+            slow.energy(jax.tree_util.tree_map(lambda a: a[0], ms.state), scheme)
+        )
         out["bound_mass"] = _by_cluster(
             np.sum(np.asarray(ms.state.clusters.masses, np.float64), axis=-1),
             ms.cluster_id,
             num_clusters,
         )
         return out
-    got = {k: np.asarray(v)[0] for k, v in jax.device_get(progs.energy_parts(ms)).items()}
+    got = {
+        k: np.asarray(v)[0] for k, v in jax.device_get(progs.energy_parts(ms)).items()
+    }
     f64 = np.float64
     out = {
         k: float(got[k]) for k in ("K_g", "K_c", "W_gg", "W_gc", "W_cc_inter", "W_cc")
@@ -1522,7 +1545,9 @@ def mesh_energy(
     out["n_live"] = int(got["n_live"])
     out["n_stripped"] = int(got["n_stripped"])
     masses = np.asarray(jax.device_get(ms.state.clusters.masses), f64)
-    out["bound_mass"] = _by_cluster(np.sum(masses, axis=-1), ms.cluster_id, num_clusters)
+    out["bound_mass"] = _by_cluster(
+        np.sum(masses, axis=-1), ms.cluster_id, num_clusters
+    )
     return out
 
 
@@ -1605,6 +1630,8 @@ def mesh_edge(
     RuntimeError
         If the slow force's verdict fails after the transfer's re-plan, or a
         migration still overflows after growing.
+    ValueError
+        Stripping with a slow force that does not couple the clusters.
     """
     if migrate is None:
         migrate = layout.ndev > 1
@@ -1673,17 +1700,26 @@ def mesh_edge(
                     int(c): d for d in range(after.shape[0]) for c in after[d] if c >= 0
                 }
                 was = {
-                    int(c): d for d in range(before.shape[0]) for c in before[d] if c >= 0
+                    int(c): d
+                    for d in range(before.shape[0])
+                    for c in before[d]
+                    if c >= 0
                 }
                 info["migration"] = {
                     "owners": [owners.get(k, -1) for k in range(int(num_clusters))],
-                    "moved_clusters": sorted(k for k in owners if was.get(k) != owners[k]),
+                    "moved_clusters": sorted(
+                        k for k in owners if was.get(k) != owners[k]
+                    ),
                 }
                 break
             if not flags[0]:
                 new_rows = int(np.ceil(1.25 * layout.rows))
                 grow = getattr(slow, "grow_rows", None)
-                ms = grow(ms, new_rows) if grow is not None else grow_rows(ms, new_rows, slow)
+                ms = (
+                    grow(ms, new_rows)
+                    if grow is not None
+                    else grow_rows(ms, new_rows, slow)
+                )
                 info["replans"].append(["rows", int(layout.rows), new_rows])
                 layout = dataclasses.replace(layout, rows=new_rows)
             if not flags[1]:
@@ -1789,7 +1825,13 @@ def run_mesh_segments(
                 raise RuntimeError(f"segment {k + 1}: the slow force's verdict failed")
             slow, start = _replanned_force(slow, start, ms)
             progs = mesh_programs(
-                layout, scheme, slow, partition, policy, float(dt), int(steps_per_segment)
+                layout,
+                scheme,
+                slow,
+                partition,
+                policy,
+                float(dt),
+                int(steps_per_segment),
             )
             ms = progs.segment(start)
             retries += 1
