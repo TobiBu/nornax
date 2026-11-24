@@ -1,4 +1,4 @@
-# Hybrid Hermite: direct-sum clusters inside an FMM galaxy (design note, sessions 1-3)
+# Hybrid Hermite: direct-sum clusters inside an FMM galaxy (design note, sessions 1-4)
 
 Multi-node accuracy plan, decision U6 (2026-11-03). The science driver is
 **globular clusters with direct-sum internal dynamics inside a live Milky Way**:
@@ -694,7 +694,10 @@ The 1e5 + 1e4 FMM run was not repeated with ferrers3 (GPU time, see the report).
 
    This is a runner seam for a second carried block and a second force. Design it with the M3 / I2 owners; escapers
    and stripping should share one live-row mechanism.
-2. **The mesh.**
+2. **The mesh.** BUILT in session 4 (HH4c, section 16); the bullets below are the plan it followed (where the build
+   differs -- the star block is all-gathered rather than sent only to the ranks within `r_in`, and the stars' field is
+   each rank's partial field summed over the mesh rather than a target walk against M1's imports -- section 16 says
+   why).
    - A cluster is owned by the rank that owns its centre of mass. Its stars move with it at migration, as one block,
      never split.
    - The target walk at a cluster's stars runs against the local tree plus the cross-domain imports (M1's symmetric
@@ -875,3 +878,106 @@ Details are in jaccpot `docs/production_2026-11.md` `## HH3b`. Test: `test_donat
 
 **Not in session 3**: the mesh (the runner refuses the clusters there), Aarseth steps, the GC science layer, HoreKa
 timing, the physics choices (today's defaults).
+
+## 16. Session 4: the clusters on the mesh (HH4c, 2026-11-24)
+
+Section 12 item 2, built. jaccpot `docs/production_2026-11.md` `## HH4c` has the runner side; the gates are below and
+in `mn-scratch/hh4c/REPORT.md`.
+
+**The principle.** `ClusterHybridHermite.step` is rowwise in the galaxy and per cluster in the clusters; only the slow
+force reads other rows. So the mesh runs THE SAME scheme code -- `cluster_rollout`, `transfer`, `refresh`,
+`strip_candidates` -- inside one `shard_map` per program on each device's own rows and slots, with a slow force that
+reaches the other devices through collectives (`nornax/hybrid_mesh.py`). On one device the force is the single card's,
+so a one-device mesh is the single-card run bit for bit (gate 1).
+
+**The layout** (`MeshLayout`, `MeshClusterState`). Every leaf of the `ClusterHybridState` is stacked `[ndev, *local]`
+and sharded over the mesh axis (per-device scalars `n_live`, `ledger`, `time` become `[ndev]`). Device `d` holds `rows`
+galaxy rows (its domain's particles and the stripped stars it took -- the first `n_live[d]`, its tree rows -- then free
+rows at the origin: its share of the reserve) and `slots` cluster slots: the clusters it OWNS (an `[slots, M]` block,
+empty slots massless). `galaxy_id` is the caller's row of a galaxy particle (`-1` on a star or a free row),
+`cluster_id` the caller's cluster index of a slot (`-1` empty). Defaults: `rows = ceil(1.25 N_g / ndev) + reserve`
+(one device: `N_g + reserve`, the single card's), `slots = K` (no device can overflow).
+
+**Ownership and migration** (`mesh_edge`, `reassign_clusters`). A cluster belongs to the device that owns its centre
+of mass under the galaxy's partition (`MeshPartition`: nornax's reference `SlabPartition`, jaccpot's `MortonPartition`
+-- exact Morton ranges in the force's box, `sfc_repartition`'s rows and cuts). At an edge (`ndev > 1`) the galaxy rows
+are repartitioned (every per-row array travels with its row: velocity, carried acceleration, star id, caller id, the
+force's per-row `aux` such as `f_b`), then every cluster is re-assigned by its centre: the cluster block is
+all-gathered (`K M` is small next to the galaxy) and each device keeps the slots it owns, in cluster-id order, as
+whole blocks (positions, velocities, masses, internal derivatives, slow acceleration, dwell, star ids, the per-slot
+`aux`). More clusters than slots on a device, or a repartition a device's rows cannot hold, is an overflow verdict:
+nothing moves, the slots/rows grow, the force re-plans and the migration runs again.
+
+**The slow force on the mesh.**
+- `DirectMeshClustersForce` (the reference, no jaccpot): galaxy rows and star slots all-gathered and put in a
+  canonical order (sorted by position), every pair of the single card's `DirectClustersForce` summed at the device's
+  own targets: a particle's sums do not depend on the device or row holding it.
+- `FusedMeshClustersForce` (`nornax/adapters/jaccpot_mesh_force.py`, jaccpot's fused lane):
+  - the galaxy: jaccpot's `FusedMeshForce` (each device's local tree plus M1's symmetric cross-domain field);
+  - galaxy -> stars: the star slots are all-gathered; each device evaluates the field of ITS sources at all of them
+    on the topology its self-gravity just built (`FusedMeshForce.shard(targets=)`: one rebuild), and the partial
+    fields -- and under `dehnen_error` the partial eq (16b) force scales, which are sums -- are summed over the mesh in
+    mesh order (`nornax.sharded.mesh_sum`); each owner keeps its slots;
+  - stars -> galaxy (the back-reaction): every device builds the star tree over the gathered slots (the same tree
+    everywhere) and evaluates HH3a's grouped form (each cluster's multipole about its centre beyond its `r_in`, the
+    star tree's walk inside) at its own galaxy rows;
+  - clusters <-> clusters: `coupling="fmm"` the star tree at the device's own stars minus each own cluster's exact
+    field (as one card); `"direct"` the pairs with the other clusters' gathered stars;
+  - plans are sized per device and max-merged (one program for every device): the stars' plan on the mesh
+    provider's rebuild of each device's rows in the global box, the back-reaction plan for each device's rows, the
+    coupling plan at each device's stars. A failed verdict re-plans from the failed state (the galaxy's caps through
+    `FusedMeshForce.replan`).
+
+  Two deviations from the item-2 plan, both simplifications at today's sizes: (1) the WHOLE star block is
+  all-gathered, not only to the ranks within a few `r_in` (at 150 x 1e3 stars that is 1.5e5 rows per rank per step,
+  next to 1e8 / ndev galaxy rows); (2) the stars' field is each rank's partial field summed over the mesh, not a
+  target walk at the owner against M1's cross-domain imports: it needs no new transport, reuses the topology the
+  self-gravity built, and every rank's walk is over its own (smaller) tree. Both are levers if the stars become a
+  large fraction of the system.
+
+**Stripping on the mesh.** A stripped star fills the next free row of the OWNING device (`transfer` on its rows), is
+a tree row there from the refresh on, and migrates with the galaxy's repartition after that (rows are re-sorted by
+the partition; `galaxy_star_id` travels with the row). The Jacobi radii's `Omega` centre is the galaxy's centre of
+mass reduced over the mesh (`galaxy_centre_sums` + `mesh_sum`). The ledger is per device; the edge sums its jumps in
+mesh order (`info["jump"]`, `jump_per_device`). A device short of free rows grows EVERY device's rows (the single
+card's growth rule per device, the largest wins). Stripping needs a force that couples the clusters (a leaver's pairs
+with other clusters' stars live on other devices): an uncoupled force with a policy is refused on the mesh.
+
+**The API.**
+
+```python
+from jaccpot.production import ProductionRunner, SegmentConfig
+from nornax.adapters.jaccpot_hybrid import galaxy_solver
+from nornax.adapters.jaccpot_mesh import MeshClustersRunnerScheme
+
+clusters = MeshClustersRunnerScheme(
+    ClusterHybridHermite(n_sub=16, split=MembershipSplit(DirectSumGravity(...))),
+    (xc, vc, mc),                        # [K, M] (zero mass: an empty slot)
+    reserve=4096,                        # free galaxy rows PER DEVICE for stripped stars
+    policy=StrippingPolicy(),
+    cluster_solver=galaxy_solver(mac_type="dehnen", theta=0.5, softening=eps_c),
+    options=dict(coupling="fmm", cluster_leaf_size=64),
+    slots=None,                          # cluster slots per device (None: K)
+)
+runner = ProductionRunner(galaxy_solver(softening=eps_g), settings=..., mesh=mesh,   # a 1-D jax Mesh
+                          segment=SegmentConfig(steps=10, restart_every=1, restart_path="ckpt_{segment}"),
+                          scheme=clusters)                  # bound to the mesh by the runner (bind_mesh)
+result = runner.run(galaxy_state, galaxy_masses, dt=dt, num_steps=n)   # result.mode == "mesh"
+result.carried.ms                        # the stacked MeshClusterState; result.state: the galaxy by caller row
+runner.run(dt=dt, num_steps=m, restart_from="ckpt_3")                 # same device count: bitwise
+```
+
+Edge rows carry the single card's columns (summed over the devices) plus `plan.owners` (each cluster's device),
+`plan.n_live_per_device`, `plan.rows` / `plan.slots`. The reference driver without jaccpot is
+`nornax.hybrid_mesh.run_mesh_segments` (the mesh twin of `run_segments`).
+
+**Checkpoints (M3).** `save_restart` writes the stacked arrays as they lie (an orbax directory: every process writes
+its own shards; `*.npz` through the host), `meta` holds the layout (`ndev`, `rows`, `slots`) and the force's plans and
+pinned trace-time state. A restart on the SAME device count restores every array onto the mesh's sharding
+(`restore_specs`), re-prepares the force at the restored state and installs the recorded plans. Another device count
+is refused with a clear error; the plan for it: gather by id, re-decompose (`decompose_clusters`) and re-assign by
+centre of mass (`migrate_start`), as a fresh start.
+
+**Not in session 4.** Escapers with the clusters on the mesh (refused), a restart on another device count (refused,
+planned above), sending the star block only to the ranks within `r_in` (all-gather today), donated mesh segments (the
+mesh path keeps a segment's start on the devices for the retry: no `keep_start` yet), GPU timing (HoreKa).

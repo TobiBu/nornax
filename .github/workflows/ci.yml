@@ -184,3 +184,41 @@ jobs:
         run: >-
           pytest -o addopts="" --no-header -q
           tests/integration/test_jaccpot_runner.py
+
+  # The clusters on jaccpot's mesh (HH4c, 2026-11-24): a one-device mesh against the
+  # single-card runner (bitwise here, a few ulp across programs) and two forced CPU
+  # devices (a subprocess) against one card. A job of its own: each case compiles the
+  # fused lane's clusters programs, the two-device one the mesh lane's too. The tests
+  # skip until JACCPOT_REF has jaccpot.distributed.clusters_mesh.
+  solver-tests-mesh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
+      JACCPOT_REF: e7797c75c63bac164321257224e68a5db3022bfe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          # jaccpot requires Python >= 3.12.
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install nornax + jaccpot and yggdrax at the pinned commits
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" \
+            "yggdrax @ git+https://github.com/TobiBu/yggdrax.git@${YGGDRAX_REF}" \
+            "jaccpot @ git+https://github.com/TobiBu/jaccpot.git@${JACCPOT_REF}"
+          python -c "import jax, jaccpot, yggdrax; print('jax', jax.__version__)"
+
+      - name: The clusters on jaccpot's mesh (CPU)
+        run: >-
+          pytest -o addopts="" --no-header -q
+          tests/integration/test_jaccpot_mesh.py

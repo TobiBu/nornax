@@ -450,3 +450,25 @@ def test_on_forced_cpu_devices(ndev):
     cross = res["crossing"]
     assert cross["moved"], cross
     assert cross["whole"] and cross["bitwise_vs_other_partition"], cross
+
+
+def test_plan_max_takes_the_larger_capacities():
+    from nornax.adapters.jaccpot_mesh_force import plan_max
+
+    @dataclasses.dataclass(frozen=True)
+    class Inner:
+        far: int
+        kind: str = "m2p"
+
+    @dataclasses.dataclass(frozen=True)
+    class Plan:
+        num_points: int
+        inner: Inner
+        theta: float = 0.5
+        flag: bool = False
+
+    a = Plan(10, Inner(5), 0.5, False)
+    b = Plan(7, Inner(9), 0.7, True)
+    got = plan_max(a, b)
+    assert got == Plan(10, Inner(9), 0.5, False)
+    assert plan_max(None, b) is b and plan_max(a, None) is a

@@ -1,6 +1,6 @@
 """``K`` direct-sum clusters inside a galaxy on a device mesh (hybrid Hermite session 4).
 
-Multi-node plan U6, track HH4c (``docs/hybrid_hermite.md`` section 15). The scheme
+Multi-node plan U6, track HH4c (``docs/hybrid_hermite.md`` section 16). The scheme
 of :mod:`nornax.hybrid_clusters` (:class:`~nornax.hybrid_clusters.ClusterHybridHermite`)
 is rowwise in the galaxy and per cluster in the clusters, except for its slow force.
 So the mesh runs THE SAME scheme code -- :func:`~nornax.hybrid_clusters.cluster_rollout`,

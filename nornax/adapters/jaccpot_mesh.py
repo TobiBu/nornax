@@ -1,6 +1,6 @@
 """The clusters on jaccpot's mesh: ``ProductionRunner(mesh=..., scheme=MeshClustersRunnerScheme(...))``.
 
-Hybrid Hermite session 4 (track HH4c; ``docs/hybrid_hermite.md`` section 15). jaccpot's
+Hybrid Hermite session 4 (track HH4c; ``docs/hybrid_hermite.md`` section 16). jaccpot's
 carried-scheme seam (``jaccpot.scheme.CarriedScheme``, HH3b) keeps the runner's loop
 and lets the scheme own its carry and programs; its MESH FORM (``bind_mesh``) runs the
 same loop on a device mesh. :class:`MeshClustersRunnerScheme` is that scheme for the
@@ -718,7 +718,7 @@ class MeshClustersRunnerScheme:
                 f"this checkpoint was written on {lay['ndev']} devices, the mesh has "
                 f"{int(mesh.devices.size)}: a clusters run restarts on the same device "
                 "count (re-assigning by centre of mass onto another is planned, "
-                "docs/hybrid_hermite.md section 15)"
+                "docs/hybrid_hermite.md section 16)"
             )
         sh = MeshLayout(mesh, int(lay["rows"]), int(lay["slots"]), lay["axis"]).sharding
         return {name: (sh, None) for name in meta["names"]}

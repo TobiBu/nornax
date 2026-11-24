@@ -1,7 +1,7 @@
 """The clusters' slow force on jaccpot's fused multi-GPU lane (hybrid Hermite session 4).
 
 :class:`FusedMeshClustersForce` is :class:`~nornax.adapters.jaccpot_hybrid.FusedClustersForce`
-on a device mesh (``docs/hybrid_hermite.md`` section 15), evaluated inside
+on a device mesh (``docs/hybrid_hermite.md`` section 16), evaluated inside
 ``shard_map`` by :mod:`nornax.hybrid_mesh`'s programs:
 
 * **The galaxy** is jaccpot's ``FusedMeshForce`` (each device's local tree plus the
@@ -93,7 +93,9 @@ def plan_max(a: Any, b: Any) -> Any:
     return dataclasses.replace(a, **kw)
 
 
-def _engine_kernel(engine: Any) -> tuple[float, str, float]:
+def _engine_kernel(
+    engine: Any,
+) -> tuple[float, str, float]:  # pragma: no cover - jaccpot
     from jaccpot.softening import resolve_softening_kernel
 
     kernel = resolve_softening_kernel(getattr(engine, "softening_kernel", None))
@@ -101,7 +103,7 @@ def _engine_kernel(engine: Any) -> tuple[float, str, float]:
 
 
 @dataclass(frozen=True, eq=False)
-class FusedMeshClustersForce:
+class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
     """The fused lane's clusters force on a device mesh (see the module docstring).
 
     Make it with :meth:`prepare`. On one device it wraps the single card's
@@ -1179,7 +1181,9 @@ class FusedMeshClustersForce:
         return force, aux
 
 
-def _fold_mesh(bits: Any, needs: Any, bits_in: Any, needs_in: Any, ax: str) -> tuple:
+def _fold_mesh(  # pragma: no cover - jaccpot
+    bits: Any, needs: Any, bits_in: Any, needs_in: Any, ax: str
+) -> tuple:
     """The galaxy verdict folded over the steps (OR / max) and the mesh."""
     bits = jax.lax.all_gather(jnp.asarray(bits, jnp.uint32), ax)
     folded = bits[0]
@@ -1192,7 +1196,7 @@ def _fold_mesh(bits: Any, needs: Any, bits_in: Any, needs_in: Any, ax: str) -> t
     return folded, needs
 
 
-def _keep_values(old: Any, seed: Any) -> Any:
+def _keep_values(old: Any, seed: Any) -> Any:  # pragma: no cover - jaccpot
     """A re-plan's ``aux``: the carried force scales kept, the verdict parts cleared."""
     if old is None:
         return seed
