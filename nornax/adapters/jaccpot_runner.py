@@ -878,10 +878,12 @@ class ClustersRunnerScheme:
         tuple
             ``(carry without its state, treedef, leaves)``.
         """
-        from jaccpot.runtime.strict_carry import host_copy
 
         def copy(x: Any) -> Any:
             if all(d.platform == "gpu" for d in x.devices()):
+                # only jaccpot's runner calls keep_start, so jaccpot is installed
+                from jaccpot.runtime.strict_carry import host_copy
+
                 return host_copy(x)  # pinned_host where the device has it
             return np.asarray(jax.device_get(jnp.copy(x)))
 
