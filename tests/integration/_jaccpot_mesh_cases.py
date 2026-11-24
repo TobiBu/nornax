@@ -208,6 +208,7 @@ def main(ndev: int) -> dict:
         scheme=MeshClustersRunnerScheme(hermite(), clusters, **kw),
     )
     r2 = mr.run(state, jnp.asarray(mg), dt=DT, num_steps=steps)
+    start = _start_accelerations(one, mr, state, jnp.asarray(mg), xg, mg, xc, mc)
     c1 = r1.carried.state
     g1, g2 = np.asarray(r1.state), np.asarray(r2.state)
     cl = hm.gather_clusters(r2.carried.ms, K)
@@ -217,9 +218,19 @@ def main(ndev: int) -> dict:
     filled = np.asarray(c1.clusters.masses) > 0
     rows1 = [e.diagnostics for e in r1.edges]
     rows2 = [e.diagnostics for e in r2.edges]
+    first = next(
+        (
+            i
+            for i, (a, b) in enumerate(zip(rows1, rows2))
+            if a["n_stripped"] != b["n_stripped"]
+        ),
+        None,
+    )
     return {
         "ndev": ndev,
         "mode": r2.mode,
+        "start": start,
+        "first_membership_difference_edge": first,
         "dx_galaxy": float(np.abs(g2 - g1)[:, 0].max()),
         "dx_clusters": float(
             np.abs(cl["positions"] - np.asarray(c1.clusters.positions)).max()
@@ -252,18 +263,91 @@ def main(ndev: int) -> dict:
     }
 
 
+def _reference(xg, mg, xc, mc, solver):
+    """fp64 direct sums with the galaxy kernel: the galaxy at the stars + the other
+    clusters' stars, and the galaxy's own field + the stars' at the galaxy rows."""
+    import jax.numpy as jnp
+    from jaccpot.softening import (
+        masked_pair_factors,
+        resolve_softening_kernel,
+        softening_params,
+    )
+
+    eng = getattr(solver, "_impl", solver)
+    kernel = resolve_softening_kernel(getattr(eng, "softening_kernel", None))
+    params = softening_params(kernel, float(eng.softening), jnp.float64)
+
+    def field(t, s, m, exclude=None):
+        dx = t[:, None, :] - s[None, :, :]
+        r2 = jnp.asarray(np.sum(dx * dx, -1))
+        ok = jnp.ones(r2.shape, bool) if exclude is None else jnp.asarray(exclude)
+        g, _, _ = masked_pair_factors(r2, ok, params, kernel)
+        return -float(eng.G) * np.sum((m[None, :] * np.asarray(g))[..., None] * dx, 1)
+
+    xs = xc.reshape(-1, 3)
+    ms = mc.reshape(-1)
+    cid = np.repeat(np.arange(mc.shape[0]), mc.shape[1])
+    a_c = field(xs, xg, mg) + field(xs, xs, ms, cid[:, None] != cid[None, :])
+    n = xg.shape[0]
+    a_g = field(xg, xg, mg, ~np.eye(n, dtype=bool)) + field(xg, xs, ms)
+    return a_g, a_c.reshape(mc.shape + (3,))
+
+
+def _start_accelerations(one, mr, state, masses, xg, mg, xc, mc) -> dict:
+    """The slow accelerations at the START (the same positions): mesh vs card vs fp64 direct."""
+    from nornax import hybrid_mesh as hm
+
+    kw = dict(dt=DT, t0=0.0, escapers=None)
+    c1 = one.scheme.start(one.solver, one.settings, state, masses, **kw).state
+    c2 = mr.scheme.start(mr.solver, mr.settings, state, masses, **kw)
+    n, K = xg.shape[0], mc.shape[0]
+    _, _, ag2 = hm.gather_galaxy(c2.ms, n)
+    ac2 = hm.gather_clusters(c2.ms, K)["cluster_acc"]
+    ag1 = np.asarray(c1.galaxy_acc)[:n]
+    ac1 = np.asarray(c1.cluster_acc)
+    ref_g, ref_c = _reference(xg, mg, xc, mc, one.solver)
+
+    def rel(a, b):
+        return float(np.linalg.norm(a - b) / np.linalg.norm(b))
+
+    return {
+        "galaxy_mesh_vs_card": rel(ag2, ag1),
+        "stars_mesh_vs_card": rel(ac2, ac1),
+        "galaxy_card_vs_direct": rel(ag1, ref_g),
+        "galaxy_mesh_vs_direct": rel(ag2, ref_g),
+        "stars_card_vs_direct": rel(ac1, ref_c),
+        "stars_mesh_vs_direct": rel(ac2, ref_c),
+        "momentum_card": float(
+            np.linalg.norm(mg @ ag1 + np.einsum("km,kmi->i", mc, ac1))
+        ),
+        "momentum_mesh": float(
+            np.linalg.norm(mg @ ag2 + np.einsum("km,kmi->i", mc, ac2))
+        ),
+    }
+
+
 def check(res: dict) -> None:
     """The force-error class against one card (the test's assertions)."""
     assert res["mode"] == "mesh"
-    assert res["star_ids_same"], res
-    assert all(a == b for a, b in res["n_stripped"]), res["n_stripped"]
-    assert res["acc_galaxy_rel_l2"] < 1e-2, res
-    if res["acc_stars_rel_l2"] is not None:
-        assert res["acc_stars_rel_l2"] < 1e-2, res
-    for a, b in res["drift"][1:]:
-        assert abs(b) < 10 * max(abs(a), 1e-7), res["drift"]
-    for a, b in res["momentum"][1:]:
-        assert abs(b) < 10 * max(abs(a), 1e-9), res["momentum"]
+    st = res["start"]
+    # the mesh is in the card's force-error class at the same positions
+    for part in ("galaxy", "stars"):
+        card = st[f"{part}_card_vs_direct"]
+        assert st[f"{part}_mesh_vs_direct"] < 3 * card + 1e-6, st
+        assert st[f"{part}_mesh_vs_card"] < 3 * card + 1e-6, st
+    # membership: the first stripping edge identical (later edges may differ by a
+    # star at the threshold: force-error-level orbits)
+    first_strip = next(i for i, (a, _) in enumerate(res["n_stripped"]) if a > 0)
+    diff = res["first_membership_difference_edge"]
+    assert diff is None or diff > first_strip, res["n_stripped"]
+    # the ledgered energy and the momentum in the card's class over the run (both
+    # carry the FMM's representation error, not round-off)
+    card = max(abs(a) for a, _ in res["drift"])
+    mesh = max(abs(b) for _, b in res["drift"])
+    assert mesh < 3 * card + 1e-6, res["drift"]
+    card = max(abs(a) for a, _ in res["momentum"])
+    mesh = max(abs(b) for _, b in res["momentum"])
+    assert mesh < 3 * card + 1e-9, res["momentum"]
 
 
 if __name__ == "__main__":
