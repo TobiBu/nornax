@@ -757,6 +757,24 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
 
             if not bool(overflow_ok(bits)):
                 gal.replan(needs_g, bits)
+            parts = np.asarray(jax.device_get(aux_f[2])).all(0)
+            if bool(parts.all()):
+                # only the galaxy's caps failed: re-prepare its mesh force at the
+                # start (the grown caps), keep every target plan (the per-device
+                # planning is the costly part of a full re-prepare)
+                st = ms.state
+                ndev = int(np.asarray(st.n_live).shape[0])
+                rows = int(st.galaxy_masses.shape[1])
+                flat_x = st.galaxy_positions.reshape(ndev * rows, 3)
+                flat_m = jnp.where(
+                    jnp.arange(rows)[None, :] < st.n_live[:, None],
+                    st.galaxy_masses,
+                    0,
+                ).reshape(ndev * rows)
+                gal.prepare(flat_x, flat_m, st.n_live)
+                new = dataclasses.replace(self)
+                cleared = _keep_values(st.aux, st.aux)
+                return new.with_pin(), ms._replace(state=st._replace(aux=cleared))
         new, aux = FusedMeshClustersForce._prepare(
             ms, galaxy=gal, partition=self.partition, **setup
         )
