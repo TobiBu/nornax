@@ -43,6 +43,7 @@ from nornax.hybrid_clusters import (  # noqa: E402
     StrippingPolicy,
     run_segments,
 )
+from nornax.hybrid_steps import AarsethSteps  # noqa: E402
 
 N, M, K = 512, 32, 3
 LEAF, ORDER, THETA = 16, 4, 0.6
@@ -127,10 +128,16 @@ def _system(fliers: int = 0):
     return tuple(map(to, (xg, vg, mg, xc, vc, mc)))
 
 
-def _hermite():
+def _hermite(steps=None):
     return ClusterHybridHermite(
-        n_sub=N_SUB, split=MembershipSplit(DirectSumGravity(G=1.0, softening=EPS_C))
+        n_sub=N_SUB,
+        split=MembershipSplit(DirectSumGravity(G=1.0, softening=EPS_C)),
+        steps=steps,
     )
+
+
+# HH4a: the adaptive (Aarseth) internal steps
+AARSETH = AarsethSteps(eta=0.02, max_rung=10, target_block=8)
 
 
 def _assert_same(got, want, rel: float = 1e-8) -> None:
@@ -154,10 +161,10 @@ def _same_program(a, b) -> None:
         np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
 
 
-def _runner(escapers=None, **seg):
+def _runner(escapers=None, steps=None, **seg):
     xg, vg, mg, xc, vc, mc = _system(fliers=4 if escapers else 0)
     clusters = ClustersRunnerScheme(
-        _hermite(),
+        _hermite(steps),
         (xc, vc, mc),
         reserve=RESERVE,
         policy=POLICY,
@@ -189,10 +196,8 @@ def stripping_run(tmp_path_factory):
     return res, path
 
 
-def test_the_runner_is_run_segments(stripping_run):
-    res, _ = stripping_run
+def _run_segments_reference(scheme):
     xg, vg, mg, xc, vc, mc = _system()
-    scheme = _hermite()
     force, aux = FusedClustersForce.prepare(
         _solver(),
         _solver(theta=0.5),
@@ -210,9 +215,14 @@ def test_the_runner_is_run_segments(stripping_run):
             force, galaxy=(a, b, c), clusters=(d, e, f), aux=g, reserve=RESERVE, time=t
         )
     )(xg, vg, mg, xc, vc, mc, aux, 0.0)
-    want, _, rows = run_segments(
+    return run_segments(
         scheme, force, start, DT, segments=SEGS, steps_per_segment=STEPS, policy=POLICY
     )
+
+
+def test_the_runner_is_run_segments(stripping_run):
+    res, _ = stripping_run
+    want, _, rows = _run_segments_reference(_hermite())
     got = res.carried.state
     for a, b in zip(jax.tree_util.tree_leaves(got), jax.tree_util.tree_leaves(want)):
         _assert_same(a, b)
@@ -284,3 +294,37 @@ def test_the_mesh_refuses_the_clusters():
     runner, _, _ = _runner()
     with pytest.raises(ValueError, match="multi-GPU"):
         check_mesh_scheme(runner.scheme)
+
+
+# ---------------------------------------------------------------------------
+# HH4a: the adaptive internal steps through the runner. Rungs are re-derived at
+# every slow step, so the carry and the checkpoint are the fixed mode's.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def adaptive_run(tmp_path_factory):
+    path = str(tmp_path_factory.mktemp("hh4a") / "a_{segment}.npz")
+    runner, state, masses = _runner(steps=AARSETH, restart_every=1, restart_path=path)
+    res = runner.run(state, masses, dt=DT, num_steps=SEGS * STEPS)
+    return res, path
+
+
+def test_adaptive_steps_runner_is_run_segments_and_restarts_bitwise(adaptive_run):
+    res, path = adaptive_run
+    want, _, rows = _run_segments_reference(_hermite(AARSETH))
+    for a, b in zip(
+        jax.tree_util.tree_leaves(res.carried.state), jax.tree_util.tree_leaves(want)
+    ):
+        _assert_same(a, b)
+    edges = [e.diagnostics for e in res.edges[1:]]
+    assert [e["strip_transfers"] for e in edges] == [r["n_take"] for r in rows]
+    assert sum(e["strip_transfers"] for e in edges) > 0
+    assert abs(edges[-1]["energy_ledgered_drift"]) < 1e-4
+    assert abs(edges[-1]["momentum_drift"]) < 1e-6
+    runner, _, _ = _runner(steps=AARSETH)
+    out = runner.run(dt=DT, num_steps=SEGS * STEPS, restart_from=path.format(segment=1))
+    assert out.restored["bitwise"], out.restored
+    _same_program(out.carried.state, res.carried.state)
+    # (a fixed-mode runner reporting the mismatch: the unit test, which has no
+    # jaccpot compile to pay for)

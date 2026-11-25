@@ -43,6 +43,7 @@ from nornax.hybrid_clusters import (
     grow_reserve,
     run_segments,
 )
+from nornax.hybrid_steps import AarsethSteps
 
 jax.config.update("jax_enable_x64", True)
 
@@ -90,22 +91,28 @@ def _system(K=2, m=24, n=48, seed=0, sigma=0.05, mass=2e-3, fliers=0):
     return tuple(jnp.asarray(a, jnp.float64) for a in (xg, vg, mg, xc, vc, mc))
 
 
-def _hermite():
+def _hermite(steps=None):
     return ClusterHybridHermite(
-        n_sub=4, split=MembershipSplit(DirectSumGravity(G=1.0, softening=0.01))
+        n_sub=4,
+        split=MembershipSplit(DirectSumGravity(G=1.0, softening=0.01)),
+        steps=steps,
     )
+
+
+# HH4a: the adaptive (Aarseth) internal steps through the runner scheme
+AARSETH = AarsethSteps(eta=0.05, max_rung=8, target_block=8)
 
 
 POLICY = StrippingPolicy(r_factor=1.0, min_members=4)
 ESC = SimpleNamespace(r_escape=3.0, return_radius=1.5, every=1)
 
 
-def _rs(reserve=64, policy=POLICY, **kw):
+def _rs(reserve=64, policy=POLICY, steps=None, **kw):
     xg, vg, mg, xc, vc, mc = kw.pop("system", None) or _system()
     kw.setdefault("slow_factory", _factory)
     return (
         ClustersRunnerScheme(
-            _hermite(),
+            _hermite(steps),
             (xc, vc, mc),
             reserve=reserve,
             policy=policy,
@@ -506,3 +513,63 @@ def test_restore_keeps_dtypes_weak_types_and_the_rest_of_the_carry():
         assert a.dtype == b.dtype
         assert getattr(a, "weak_type", False) == getattr(b, "weak_type", False)
     assert back.slow is carry.slow and back.n_galaxy == carry.n_galaxy
+
+
+# ---------------------------------------------------------------------------
+# HH4a: adaptive internal steps through the runner scheme (rungs are re-derived
+# at every slow step: nothing new is carried or checkpointed)
+# ---------------------------------------------------------------------------
+
+
+def test_adaptive_steps_runner_is_run_segments_and_restarts_bitwise():
+    rs, state, masses = _rs(steps=AARSETH)
+    once, infos = _drive(rs, state, masses, 4)
+    assert sum(i["n_take"] for i in infos) > 0
+    xg, vg, mg, xc, vc, mc = _system()
+    scheme = rs.scheme
+    start = jax.jit(
+        lambda a, b, c, d, e, f, t: scheme.initial_state(
+            SLOW, galaxy=(a, b, c), clusters=(d, e, f), aux=None, reserve=64, time=t
+        )
+    )(xg, vg, mg, xc, vc, mc, 0.0)
+    want, _, _ = run_segments(
+        scheme, SLOW, start, DT, segments=4, steps_per_segment=STEPS, policy=POLICY
+    )
+    _same(once.state, want)
+    # the carry has the fixed mode's structure (no rung state)
+    fixed, _, _ = _rs()
+    assert jax.tree_util.tree_structure(
+        fixed.start(None, None, state, masses, dt=DT, t0=0.0, escapers=None).state
+    ) == jax.tree_util.tree_structure(once.state)
+    first, _ = _drive(rs, state, masses, 4, stop=2)
+    restored, mismatches = _roundtrip(rs, first)
+    assert mismatches == []
+    rest, _ = _drive(rs, None, None, 2, carry=restored)
+    _same(rest.state, once.state)
+    # a checkpoint of the fixed mode does not restore into the adaptive one
+    arrays, meta = rs.checkpoint(first)
+    assert meta["scheme"]["steps"] == repr(AARSETH)
+    assert "steps" not in fixed.record()
+    _, bad = fixed.restore(
+        {k: np.asarray(v) for k, v in arrays.items()},
+        json.loads(json.dumps(meta)),
+        solver=None,
+        settings=None,
+        dt=DT,
+        escapers=None,
+    )
+    assert bad == ["scheme"]
+    assert rs.key() != fixed.key() and rs.key()[-1] == repr(AARSETH)
+
+
+def test_adaptive_steps_donated_segments_rerun_from_the_host_copy_bitwise():
+    rs, state, masses = _rs(steps=AARSETH)
+    want, _ = _drive(*_rs(steps=AARSETH), 2)
+    carry = rs.start(None, None, state, masses, dt=DT, t0=0.0, escapers=None)
+    for k in range(2):
+        kept = rs.keep_start(carry)
+        carry = rs.segment(carry, DT, STEPS, donate=True)
+        if k == 1:
+            carry = rs.segment(rs.restore_start(kept), DT, STEPS, donate=True)
+        carry, _ = rs.edge(carry, index=k + 1, escapers_due=False, energy=False)
+    _same(carry.state, want.state)

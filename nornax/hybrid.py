@@ -61,6 +61,7 @@ import jax.numpy as jnp
 
 from nornax.forces.base import ForceModel
 from nornax.forces.direct import DirectSumGravity
+from nornax.hybrid_steps import AarsethSteps, aarseth_block_flow
 from nornax.solvers.hermite4 import hermite4_step
 from nornax.solvers.hermite6 import hermite6_step
 from nornax.solvers.leapfrog_kdk import DRIFT_ORDERS, drift_positions, kick_velocities
@@ -318,6 +319,11 @@ class HybridHermite:
     drift_order : str
         The galaxy's drift (:data:`~nornax.solvers.leapfrog_kdk.DRIFT_ORDERS`),
         as :class:`~nornax.schemes.LeapfrogKDK`'s.
+    steps : AarsethSteps | None
+        ``None`` (default): the fixed ``n_sub`` steps. A
+        :class:`~nornax.hybrid_steps.AarsethSteps`: adaptive individual block
+        steps inside each slow step (Hermite-4 only; ``docs/hybrid_hermite.md``
+        section 15).
     """
 
     n_sub: int = 8
@@ -325,6 +331,7 @@ class HybridHermite:
     split: Any = field(default_factory=MembershipSplit)
     coupled: bool = True
     drift_order: str = "summed"
+    steps: AarsethSteps | None = None
 
     def __post_init__(self) -> None:
         if int(self.n_sub) < 1:
@@ -344,6 +351,14 @@ class HybridHermite:
                 f"split kind {self.split.kind!r}: only 'membership' is implemented "
                 "(a changeover split is planned, docs/hybrid_hermite.md)"
             )
+        if self.steps is not None:
+            if not isinstance(self.steps, AarsethSteps):
+                raise TypeError("steps must be None or an AarsethSteps")
+            if int(self.order) != 4:
+                raise NotImplementedError(
+                    "adaptive internal steps are Hermite-4 only (order=4); "
+                    "docs/hybrid_hermite.md section 15"
+                )
 
     @property
     def internal(self) -> ForceModel:
@@ -384,7 +399,14 @@ class HybridHermite:
         return cluster._replace(derivs=derivs)
 
     def fast_flow(self, cluster: NBodyState, dt: Any) -> NBodyState:
-        """``n_sub`` Hermite steps of ``dt / n_sub`` on the internal force."""
+        """``n_sub`` Hermite steps of ``dt / n_sub`` on the internal force.
+
+        With ``steps`` set: the adaptive block steps
+        (:func:`~nornax.hybrid_steps.aarseth_block_flow`).
+        """
+        if self.steps is not None:
+            dtc = jnp.asarray(dt, cluster.positions.dtype)
+            return aarseth_block_flow(cluster, dtc, self.internal, self.steps)[0]
         h = jnp.asarray(dt, cluster.positions.dtype) / int(self.n_sub)
         step = hermite4_step if int(self.order) == 4 else hermite6_step
 
@@ -487,7 +509,9 @@ class HybridHermite:
                 v_half = cl.velocities + half * jnp.asarray(
                     state.cluster_acc, cl.positions.dtype
                 )
-                cl = self.internal_derivatives(cl._replace(velocities=v_half))
+                cl = cl._replace(velocities=v_half)
+                if self.steps is None:  # the adaptive flow evaluates its own
+                    cl = self.internal_derivatives(cl)
             cl = self.fast_flow(cl, dtc)
         xc = None if cl is None else cl.positions
         mc = None if cl is None else cl.masses

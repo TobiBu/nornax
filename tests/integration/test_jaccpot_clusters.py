@@ -48,6 +48,7 @@ from nornax.hybrid_clusters import (  # noqa: E402
     cluster_rollout,
     run_segments,
 )
+from nornax.hybrid_steps import AarsethSteps  # noqa: E402
 
 N, M, K = 512, 32, 3
 LEAF, ORDER, THETA = 16, 4, 0.6
@@ -158,9 +159,9 @@ def _prepare(xc, mc, reserve=0, coupling="none", cross="fmm"):
     )
 
 
-def _run(force, aux, clusters, reserve=0, steps=STEPS):
+def _run(force, aux, clusters, reserve=0, steps=STEPS, aarseth=None):
     xg, vg, mg, *_ = _system()
-    scheme = ClusterHybridHermite(n_sub=N_SUB, split=_split())
+    scheme = ClusterHybridHermite(n_sub=N_SUB, split=_split(), steps=aarseth)
     start = jax.jit(
         lambda a: scheme.initial_state(
             force, galaxy=(xg, vg, mg), clusters=clusters, aux=a, reserve=reserve
@@ -320,3 +321,28 @@ def test_the_hybrid_galaxy_default_is_dehnen_error():
     assert galaxy_solver(softening=1e-2).advanced.mac_type == "dehnen_error"
     geo = galaxy_solver(softening=1e-2, mac_type="dehnen", theta=0.5)
     assert geo.advanced.mac_type == "dehnen"
+
+
+def test_adaptive_steps_on_the_fused_lane():
+    """HH4a: every star on rung 2 is fixed n_sub = 4 (a few ulp: another program);
+    adaptive rungs keep the energy drift at the fixed step's."""
+    _, _, _, xc, vc, mc = _system()
+    force, aux = _prepare(xc, mc, coupling="fmm")
+    _, _, fixed = _run(force, aux, (xc, vc, mc))
+    one = AarsethSteps(min_rung=2, max_rung=2, target_block=None)
+    _, _, got = _run(force, aux, (xc, vc, mc), aarseth=one)
+    for a, b in zip(
+        jax.tree_util.tree_leaves((got.galaxy_positions, got.clusters)),
+        jax.tree_util.tree_leaves((fixed.galaxy_positions, fixed.clusters)),
+    ):
+        _assert_same(a, b)
+    scheme, start, end = _run(
+        force, aux, (xc, vc, mc), aarseth=AarsethSteps(eta=0.02, target_block=8)
+    )
+    assert force.verdict(end.aux) == (True, True)
+    e0, e1 = force.energy(start, scheme), force.energy(end, scheme)
+    ef = force.energy(fixed, scheme)
+    drift = abs(e1["E"] - e0["E"]) / abs(e0["E"])
+    # both drifts are the slow step's (1.810e-6 here): the internal error is below it
+    assert drift <= 1.01 * abs(ef["E"] - e0["E"]) / abs(e0["E"]) + 1e-9
+    np.testing.assert_allclose(e1["P"], e0["P"], atol=1e-6)

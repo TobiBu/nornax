@@ -60,6 +60,7 @@ import numpy as np
 from nornax.forces.base import ForceModel
 from nornax.forces.direct import DirectSumGravity
 from nornax.hybrid import MembershipSplit, ShortRangeSplit
+from nornax.hybrid_steps import AarsethSteps, BlockFlowStats, aarseth_block_flow
 from nornax.solvers.hermite4 import hermite4_step
 from nornax.solvers.hermite6 import hermite6_step
 from nornax.solvers.leapfrog_kdk import DRIFT_ORDERS, drift_positions, kick_velocities
@@ -822,7 +823,14 @@ class ClusterHybridHermite:
         The galaxy's drift (:data:`~nornax.solvers.leapfrog_kdk.DRIFT_ORDERS`).
     cluster_batch : int | None
         ``None``: ``vmap`` over all clusters; an int: ``lax.map`` over chunks of
-        that many clusters (bounds the internal force's memory).
+        that many clusters (bounds the internal force's memory). With ``steps``
+        set, ``None`` (or ``1``) maps the clusters ONE at a time (each its own
+        block-time loop); an int ``b > 1`` runs ``b`` clusters in lockstep.
+    steps : AarsethSteps | None
+        ``None`` (default): the fixed ``n_sub`` steps. An
+        :class:`~nornax.hybrid_steps.AarsethSteps`: adaptive individual block
+        steps inside each slow step, per cluster (Hermite-4 only; ``n_sub`` is
+        then unused; ``docs/hybrid_hermite.md`` section 15).
     """
 
     n_sub: int = 8
@@ -831,6 +839,7 @@ class ClusterHybridHermite:
     coupled: bool = True
     drift_order: str = "summed"
     cluster_batch: int | None = None
+    steps: AarsethSteps | None = None
 
     def __post_init__(self) -> None:
         if int(self.n_sub) < 1:
@@ -851,6 +860,14 @@ class ClusterHybridHermite:
             )
         if self.cluster_batch is not None and int(self.cluster_batch) < 1:
             raise ValueError(f"cluster_batch must be >= 1, got {self.cluster_batch}")
+        if self.steps is not None:
+            if not isinstance(self.steps, AarsethSteps):
+                raise TypeError("steps must be None or an AarsethSteps")
+            if int(self.order) != 4:
+                raise NotImplementedError(
+                    "adaptive internal steps are Hermite-4 only (order=4); "
+                    "docs/hybrid_hermite.md section 15"
+                )
         _masked_internal(self.split.fast_force())
 
     @property
@@ -903,8 +920,52 @@ class ClusterHybridHermite:
         )
         return clusters._replace(derivs=derivs)
 
+    def fast_flow_stats(
+        self, clusters: NBodyState, dt: Any
+    ) -> tuple[NBodyState, BlockFlowStats]:
+        """The adaptive fast flow and its per-cluster counts (``steps`` only).
+
+        Parameters
+        ----------
+        clusters : NBodyState
+            ``[K, M]`` clusters (their cached derivatives are not read: the flow
+            evaluates them through crackle at the start).
+        dt : Any
+            The slow step.
+
+        Returns
+        -------
+        tuple[NBodyState, BlockFlowStats]
+            The clusters at ``t + dt`` and ``[K]`` counts.
+
+        Raises
+        ------
+        ValueError
+            Without ``steps``.
+        """
+        if self.steps is None:
+            raise ValueError("fast_flow_stats needs steps=AarsethSteps(...)")
+        dtc = jnp.asarray(dt, clusters.positions.dtype)
+        model, steps = self.internal, self.steps
+
+        def one(c: NBodyState) -> tuple[NBodyState, BlockFlowStats]:
+            return aarseth_block_flow(c, dtc, model, steps)
+
+        batch = self.cluster_batch
+        if batch is None or int(batch) == 1:
+            # one cluster at a time: each runs its own block-time loop (under a
+            # vmap the loops run in lockstep and the compacted/full cond is a
+            # select that evaluates both branches)
+            return jax.lax.map(one, clusters)
+        return jax.lax.map(one, clusters, batch_size=int(batch))
+
     def fast_flow(self, clusters: NBodyState, dt: Any) -> NBodyState:
-        """``n_sub`` Hermite steps of ``dt / n_sub`` for every cluster."""
+        """``n_sub`` Hermite steps of ``dt / n_sub`` for every cluster.
+
+        With ``steps`` set: the adaptive block steps (:meth:`fast_flow_stats`).
+        """
+        if self.steps is not None:
+            return self.fast_flow_stats(clusters, dt)[0]
         h = jnp.asarray(dt, clusters.positions.dtype) / int(self.n_sub)
         step = hermite4_step if int(self.order) == 4 else hermite6_step
         model, n_sub = self.internal, int(self.n_sub)
@@ -1059,7 +1120,9 @@ class ClusterHybridHermite:
             if kicked:
                 half = 0.5 * dtc
                 v_half = cl.velocities + half * state.cluster_acc
-                cl = self.internal_derivatives(cl._replace(velocities=v_half))
+                cl = cl._replace(velocities=v_half)
+                if self.steps is None:  # the adaptive flow evaluates its own
+                    cl = self.internal_derivatives(cl)
             cl = self.fast_flow(cl, dtc)
         ag_new, ac_new, aux = self._slow(slow, xg_new, mg, state.n_live, cl, state.aux)
         vg_new = kick_velocities(vg, ag, ag_new, dtg, self.drift_order)
