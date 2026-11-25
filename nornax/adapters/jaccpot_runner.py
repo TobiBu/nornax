@@ -1280,6 +1280,10 @@ class ClustersRunnerScheme:
         aux = st.aux
         galaxy_aux = aux[0] if isinstance(aux, tuple) and len(aux) == 5 else None
         reserve = int(rec.get("reserve", rows - n_g))
+        pin = meta.get("pin")
+        # the writer's tree bounds (leaf capacity, depth) before the re-prepare:
+        # its tree then has the writer's shape (HH5 item 3; jaccpot >= HH5)
+        _install_recorded_tree([solver, self.cluster_solver], pin)
         slow, _ = self._factory()(
             self,
             solver,
@@ -1292,7 +1296,6 @@ class ClustersRunnerScheme:
             n_live=int(st.n_live),
             galaxy_aux=galaxy_aux,
         )
-        pin = meta.get("pin")
         if "plans" in rec:
             slow, bad = _with_force_record(slow, rec, pin)
             mismatches += bad
@@ -1308,6 +1311,22 @@ class ClustersRunnerScheme:
             strip_transfers=int(meta["strip_transfers"]),
         )
         return carry, mismatches
+
+
+def _install_recorded_tree(solvers: list, pin: Any) -> None:
+    """jaccpot's ``install_recorded_tree`` on the solvers' engines (a no-op without it).
+
+    ``pin`` lists the engines as :func:`_engines` does: the galaxy's, then the
+    star provider's (when the force has one).
+    """
+    if pin is None:
+        return
+    try:
+        from jaccpot.carried import install_recorded_tree
+    except ImportError:  # a jaccpot before HH5: the restore as before
+        return
+    engines = [s for s in solvers if s is not None][: len(pin["engines"])]
+    install_recorded_tree(engines, pin)
 
 
 def _with_force_record(slow: Any, rec: dict, pin: Any) -> tuple:  # pragma: no cover

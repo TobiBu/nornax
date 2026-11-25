@@ -446,3 +446,25 @@ def test_one_cluster_has_no_coupling_field():
     assert bool(ok) and np.asarray(needs).tolist() == [0, 0]
     acc, pot, _, _ = force._coupling_field(xs, jnp.ones(4), None)
     assert pot is None and acc.shape == (4, 3)
+
+
+def test_a_restore_installs_the_writers_tree_bounds_first(monkeypatch):
+    """Item 3: the restore gives the solvers the record's tree bounds (jaccpot's
+    ``install_recorded_tree``) before it re-prepares; a no-op on older jaccpot."""
+    from nornax.adapters import jaccpot_runner as jr
+
+    got = []
+    carried = types.ModuleType("jaccpot.carried")
+    carried.install_recorded_tree = lambda engines, pin: got.append((engines, pin))
+    monkeypatch.setitem(sys.modules, "jaccpot", types.ModuleType("jaccpot"))
+    monkeypatch.setitem(sys.modules, "jaccpot.carried", carried)
+    pin = {"engines": [{"leaf_capacity": 2048}]}
+    jr._install_recorded_tree(["galaxy", "stars"], pin)
+    jr._install_recorded_tree(["galaxy", None], None)
+    assert got == [(["galaxy"], pin)]
+    pin2 = {"engines": [{}, {}]}
+    jr._install_recorded_tree(["galaxy", "stars"], pin2)
+    assert got[-1] == (["galaxy", "stars"], pin2)
+    monkeypatch.setitem(sys.modules, "jaccpot.carried", types.ModuleType("old"))
+    jr._install_recorded_tree(["galaxy"], pin)  # no helper: nothing, no error
+    assert len(got) == 2
