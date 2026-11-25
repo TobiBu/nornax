@@ -1567,6 +1567,11 @@ def _replanned_force(slow: Any, ms: MeshClusterState, failed: Any = None) -> tup
     return _replan(slow, ms, failed)
 
 
+def _reasons(slow: Any, ms: MeshClusterState) -> list:
+    fn = getattr(slow, "reasons", None)
+    return ["slow force verdict"] if fn is None else list(fn(ms.state.aux))
+
+
 def _fits(slow: Any, ms: MeshClusterState) -> bool:
     ok = getattr(slow, "slow_ok", None)
     return True if ok is None else bool(ok(ms.state.aux))
@@ -1583,6 +1588,7 @@ def mesh_edge(
     num_galaxy: int,
     num_clusters: int,
     migrate: bool | None = None,
+    refresh_replans: int = 4,
 ) -> tuple:
     """One edge on the mesh: stripping, then the galaxy's repartition and the clusters' owners.
 
@@ -1595,7 +1601,7 @@ def mesh_edge(
        every cluster to the owner of its centre of mass, as one block; an
        overflow grows the rows or the slots and migrates again.
     3. After a transfer, the forces are re-evaluated (``refresh``; a failed
-       verdict re-plans once).
+       verdict re-plans, up to ``refresh_replans`` times).
 
     Parameters
     ----------
@@ -1617,6 +1623,8 @@ def mesh_edge(
         ``K``.
     migrate : bool | None
         Migrate (``None``: when ``ndev > 1``).
+    refresh_replans : int
+        Re-plans after a transfer's refresh while the verdict fails.
 
     Returns
     -------
@@ -1735,15 +1743,21 @@ def mesh_edge(
             raise RuntimeError("the migration still overflows after growing")
     if transferred:
         ms = progs.refresh(ms)
-        if not _fits(slow, ms):
-            info["replans"].append(["refresh", "slow force verdict"])
+        for _ in range(int(refresh_replans)):
+            if _fits(slow, ms):
+                break
+            # the new rows outgrew a plan: re-plan from what the refresh needed
+            # and refresh again (a truncated evaluation's needs can be lower
+            # bounds: jaccpot's mesh runner re-plans while a re-run progresses)
+            info["replans"].append(["refresh", _reasons(slow, ms)])
             slow, ms = _replanned_force(slow, ms, ms)
             progs = mesh_programs(layout, scheme, slow, partition, policy)
             ms = progs.refresh(ms)
-            if not _fits(slow, ms):
-                raise RuntimeError(
-                    "the slow force's verdict failed after the transfer's re-plan"
-                )
+        if not _fits(slow, ms):
+            raise RuntimeError(
+                "the slow force's verdict failed after the transfer's "
+                f"{int(refresh_replans)} re-plans: {_reasons(slow, ms)}"
+            )
     return layout, slow, ms, info
 
 
