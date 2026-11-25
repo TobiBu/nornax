@@ -1447,7 +1447,7 @@ class FusedClustersForce:
                     headroom=float(headroom),
                     softening=back_eps,
                 )
-            if coupling == "fmm":
+            if coupling == "fmm" and K > 1:  # K = 1: no other cluster
                 plan_cc = tp.plan_target_points(
                     clu,
                     ctopo,
@@ -1889,6 +1889,14 @@ class FusedClustersForce:
     ) -> tuple:
         """``(acc, pot, ok, needs)`` of the other clusters at the star slots."""
         K, M = self.shape
+        if K == 1:
+            # one cluster: there is no other one. "fmm" would evaluate the star
+            # tree at the stars and subtract the cluster's own field exactly --
+            # two O(M^2) sums that cancel to the FMM's residual (HH4a: ~60 s per
+            # slow step at M = 1e5); "direct" has no pair (section 17, item 4)
+            zero = jnp.zeros_like(xs)
+            pot = jnp.zeros(xs.shape[:1], xs.dtype) if potential else None
+            return zero, pot, jnp.asarray(True), jnp.zeros((2,), jnp.int32)
         if self.coupling == "direct":
             G, kernel, eps = self._engine_kernel()
             cid = jnp.repeat(jnp.arange(K, dtype=jnp.int32), M)

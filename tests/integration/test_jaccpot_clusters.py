@@ -356,10 +356,10 @@ def test_empty_slots_do_not_shape_the_star_tree():
     cubic = bool(getattr(force.clusters.engine, "_tree_cubic_bounds", False))
     _, _, n, box = _filled_cut(far.reshape(-1, 3), mc_e.reshape(-1), cubic)
     assert int(n) == int(np.sum(~np.asarray(empty)))
-    filled = np.asarray(xc).reshape(-1, 3)[~np.asarray(empty).reshape(-1)]
-    assert np.all(np.asarray(box[0]) <= filled.min(0) + 1e-12)
-    assert np.all(np.asarray(box[1]) >= filled.max(0) - 1e-12)
-    assert np.all(np.asarray(box[1]) < np.asarray(far).reshape(-1, 3).max(0))
+    filled = jnp.asarray(np.asarray(xc).reshape(-1, 3)[~np.asarray(empty).reshape(-1)])
+    own = _filled_cut(filled, jnp.ones(filled.shape[0]), cubic)[3]
+    for got, want in zip(box, own):  # the filled slots' own box, not the far ones'
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
     # nothing empty: the cut is the plain tree, bitwise
     xs, ms = xc.reshape(-1, 3), mc.reshape(-1)
     plan = force.coupling_plan

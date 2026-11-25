@@ -434,3 +434,15 @@ def test_edge_programs_compile_once_per_scheme_not_per_force():
     assert _Programs(scheme, plain, 0.01, 2, policy, None).transfer is not pa.transfer
     assert _Programs(scheme, plain, 0.01, 2, None, None).candidates is None
     jax.clear_caches()
+
+
+def test_one_cluster_has_no_coupling_field():
+    """Item 4: with K = 1 there is no other cluster; the coupling term is zero
+    (it was the star tree minus the cluster's own field: two O(M^2) sums)."""
+    force = _force(shape=(1, 4), coupling="fmm")
+    xs = jnp.ones((4, 3))
+    acc, pot, ok, needs = force._coupling_field(xs, jnp.ones(4), None, potential=True)
+    assert not np.any(np.asarray(acc)) and not np.any(np.asarray(pot))
+    assert bool(ok) and np.asarray(needs).tolist() == [0, 0]
+    acc, pot, _, _ = force._coupling_field(xs, jnp.ones(4), None)
+    assert pot is None and acc.shape == (4, 3)
