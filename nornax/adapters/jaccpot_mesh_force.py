@@ -454,6 +454,9 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
             plan = self.stars_plan
 
             def targets(provider: Any, topology: Any) -> Any:
+                # empty slots (stripped stars' parked slots, a device's unused
+                # slots at the origin) are no targets: their zero force scale
+                # would open every node under the criterion
                 return provider.target_field(
                     topology,
                     xs_all,
@@ -461,6 +464,7 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
                     force_scale=fb_all,
                     potential=potential,
                     return_force_scale=bool(self.scale_carry and not potential),
+                    point_mask=ms_all > 0,
                 )
 
             if potential:
@@ -559,6 +563,7 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
                     xs,
                     self.coupling_plan,
                     softening=self.back_softening,
+                    point_mask=ms > 0,
                     potential=potential,
                 )
 
@@ -1064,6 +1069,7 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
         dtype = xg_h.dtype
         pts = jnp.asarray(xc_h.reshape(-1, 3), dtype)
         msf = jnp.asarray(mc_h.reshape(-1), dtype)
+        filled = msf > 0  # the target walks skip empty slots (point_mask)
         eng = getattr(galaxy_solver, "_impl", galaxy_solver)
         cubic = bool(getattr(eng, "_tree_cubic_bounds", False))
         gal = galaxy
@@ -1109,14 +1115,19 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
                         num_valid=jnp.asarray(int(n_live[d]), jnp.int32),
                     )
                     p = tp.plan_target_points(
-                        provider, src, pts, group_size=group_size, headroom=headroom
+                        provider,
+                        src,
+                        pts,
+                        group_size=group_size,
+                        headroom=headroom,
+                        point_mask=filled,
                     )
                     plan_s = plan_max(plan_s, p)
                     if provider.scale_carry:
                         fb_parts.append(
                             np.asarray(
                                 tp.bootstrap_target_force_scale(
-                                    provider, src, pts, plan=p
+                                    provider, src, pts, plan=p, point_mask=filled
                                 )[0]
                             )
                         )
@@ -1151,12 +1162,14 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
             if coupling == "fmm":
                 for d in range(ndev):
                     own = pts[d * S * M : (d + 1) * S * M]
-                    p = clu.plan_targets(
+                    p = tp.plan_target_points(
+                        clu,
                         ctopo,
                         own,
                         group_size=group_size,
                         headroom=headroom,
                         softening=back_eps,
+                        point_mask=filled[d * S * M : (d + 1) * S * M],
                     )
                     plan_cc = plan_max(plan_cc, p)
             del ctopo
