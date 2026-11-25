@@ -189,7 +189,9 @@ class MeshClustersRunnerScheme:
     headroom : float
         The default rows' factor over an even split.
     max_retries : int
-        Re-plans per segment.
+        Re-plans per segment (4: a re-plan on the mesh grows from needs read on
+        a run that may have stopped early, as jaccpot's mesh runner re-plans
+        while a re-run makes progress).
     mesh : Any
         The bound mesh (:meth:`bind_mesh`).
     axis_name : str
@@ -210,7 +212,7 @@ class MeshClustersRunnerScheme:
     rows: int | None = None
     slots: int | None = None
     headroom: float = 1.25
-    max_retries: int = 2
+    max_retries: int = 4
     mesh: Any = None
     axis_name: str = AXIS_NAME
 

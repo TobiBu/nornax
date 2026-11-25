@@ -899,7 +899,8 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
             ``FusedClustersForce.prepare``'s.
         cross_caps : Any
             The galaxy's cross-domain capacities (``None``: jaccpot's
-            ``CrossCapacities()``; a retry grows them).
+            jaccpot's sizing, ``"auto"``: measured at the start, as its mesh runner does;
+            a retry grows them).
 
         Returns
         -------
@@ -985,7 +986,7 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
             layout.mesh,
             leaf_size=int(leaf_size),
             max_order=int(max_order),
-            cross_caps=CrossCapacities() if caps is None else caps,
+            cross_caps="auto" if caps is None else caps,
             level_floor=None if level_floor is None else tuple(level_floor),
             axis_name=layout.axis_name,
         )
@@ -1055,6 +1056,12 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
                 jnp.arange(rows)[None, :] < st.n_live[:, None], st.galaxy_masses, 0
             ).reshape(ndev * rows)
             gal.prepare(flat_x, flat_m, st.n_live)
+            if getattr(gal, "needs_cross_sizing", False):
+                # jaccpot's own sizing (as its mesh runner's start): measure the
+                # start force's cross needs, size every capacity from them
+                gal.plan_cross(
+                    lambda: _measure_cross(gal, layout, flat_x, flat_m, st.n_live)
+                )
             if gal.scale_carry:
                 f_b_rows = np.asarray(jax.device_get(gal.force_scale_seed)).reshape(
                     ndev, rows
@@ -1181,6 +1188,39 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
             None,
         )
         return force, aux
+
+
+def _measure_cross(
+    gal: Any, layout: MeshLayout, x: Any, m: Any, counts: Any
+) -> np.ndarray:  # pragma: no cover - jaccpot
+    """The galaxy force's cross needs at these rows (host, max over the mesh)."""
+    from jax.sharding import PartitionSpec as P
+
+    from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+    ax = layout.axis_name
+    seed = gal.force_scale_seed if gal.scale_carry else None
+
+    def body(x: Any, m: Any, c: Any, *fb: Any) -> Any:
+        kw = {"force_scale": fb[0]} if fb else {}
+        needs = gal.shard(x, m, c[0], None, **kw)[2]
+        return jax.lax.pmax(jnp.asarray(needs, jnp.int32), ax)[None]
+
+    spec = P(ax)
+    args = (x, m, counts) + (() if seed is None else (seed,))
+    prog = jax.jit(
+        jax.shard_map(
+            body,
+            mesh=layout.mesh,
+            in_specs=(spec,) * len(args),
+            out_specs=spec,
+            check_vma=False,
+        )
+    )
+    with gal.context():
+        gal.before_trace()
+        out = np.asarray(jax.device_get(prog(*args)))[0]
+    return out[len(NEEDS_FIELDS) :]
 
 
 def _fold_mesh(  # pragma: no cover - jaccpot
