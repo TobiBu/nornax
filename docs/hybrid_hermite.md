@@ -480,7 +480,8 @@ The galaxy's caps and the stars' plan are sized for the reserve from the start: 
 live rows plus the free rows parked among the clusters, so a stripping edge does not need a re-plan. A dissolving
 cluster's spreading stars can still outgrow the star tree's and the back-reaction's capacities; that is what the
 retry is for. **Every re-plan compiles a new program set**: minutes on a loaded host, and the bulk of gate 5's wall
-time (section 11). Session 3's runner should size these capacities with more headroom, from the needs history.
+time (section 11). Session 3's runner should size these capacities with more headroom, from the needs history. (Section 17: empty slots no longer
+enter the star tree, and a re-plan grows only the failed part, to 2x its need.)
 
 **When a star leaves** (`StrippingPolicy`, checked at segment edges by `run_segments`):
 
@@ -715,12 +716,16 @@ The 1e5 + 1e4 FMM run was not repeated with ferrers3 (GPU time, see the report).
    synchronised at each slow step, per cluster (each cluster its own rung distribution; `lax.map` over clusters
    keeps them independent). Gate: a cluster's internal energy over 100 crossing times at `eps_c -> 0`. A GPU
    direct-sum Hermite kernel (Pallas) if the `O(K M^2)` sum binds at `M = 1e5`.
-4. **The Odisseo GC-in-MW science layer.**
-   - IC: Milky Way globular clusters on their observed orbits (Baumgardt's catalogue: positions, proper motions,
-     distances, radial velocities, masses, half-mass radii) in the Odisseo MW model, King / Plummer realisations,
-     astropy units -> code units.
-   - A demo notebook: Pal 5 (or a few GCs) forming streams in a 1e6-1e7-particle live MW.
-   - A bundle of K ~ 150 GCs as the scaling case.
+4. **The Odisseo GC-in-MW science layer.** BUILT (HH4b, Odisseo PR #49):
+   - the API: `odisseo.globular_clusters` (Baumgardt's catalogue, astropy Galactocentric, King/Plummer,
+     `clusters_from_catalogue`, `clusters_scheme`);
+   - the demo: `notebooks/gc_in_mw/` (Pal 5 in a live 1e6 MW vs Odisseo's static MW; the K = 165 bundle);
+   - docs: Odisseo `docs/source/globular_clusters.md`.
+
+   Learned: empty slots must not stretch the star tree (request in the HH4b report); a capacity re-plan
+   is a full recompile, which binds long runs of dissolving clusters. Both addressed in section 17 (HH5): the star
+   tree is built over the filled slots only, a re-plan grows only what failed (with headroom), and a restore keeps
+   the writer's tree; Odisseo's two workarounds (the empty-slot re-park, the restore preflight patch) can go.
 5. **HoreKa timing** (`bench/slurm/hh/`, with HH2a's target-walk sbatch; session 3 prepared job `hh3` for the
    slow step at K = 10 / 150 against the galaxy step, the back-reaction alone and `coupling="fmm"` vs `"none"`:
    section 13; the internal sums, the transfer edge and a re-plan are not timed yet):
@@ -1207,3 +1212,111 @@ on the mesh against that, or by a direct-sum energy for small systems (`hh4c/scr
 **Not in session 4.** Escapers with the clusters on the mesh (refused), a restart on another device count (refused,
 planned above), sending the star block only to the ranks within `r_in` (all-gather today), donated mesh segments (the
 mesh path keeps a segment's start on the devices for the retry: no `keep_start` yet), GPU timing (HoreKa).
+
+## 17. Session 5: cluster hardening (HH5, 2026-11-25)
+
+The wave-8 follow-ups (HH4b requests 1-3, HH4c open issues 4-5, HH4a's `coupling="fmm"` flag). jaccpot
+`docs/production_2026-11.md` `## HH5` has the restore side; scripts and rows in `mn-scratch/hh5/`.
+
+### 17.1 Empty slots no longer shape the star tree (HH4b request 1, HH4c open issue 5)
+
+**The problem.** An empty slot (a stripped star's slot, a padded or dissolved cluster's, a mesh device's unused slot)
+is massless, but it was still a ROW of the star tree: `rebuild(xs, ms)` over all `K M` slots. A stripped star's slot
+stays where the star left (section 9), so the tree's box followed the cluster along its orbit, its leaves held the
+parked slots, and its static capacities overflowed: a re-plan and a recompile at every stripping edge (HH4b: ~22 min
+per segment at 1e7 + 4096; `hh4b/runs/pal5_live_gpu_norepark`). On the mesh, `reassign_clusters` also leaves a
+device's unused slots at the origin, and every device's star tree spans all gathered slots.
+
+**The fix** (`nornax/adapters/jaccpot_hybrid.py`): the star tree is built over the FILLED slots only.
+
+- `star_topology(provider, xs, ms)` (every traced rebuild, single card and mesh): for cell leaves, the escaper split's
+  live-row cut through jaccpot's public `rebuild(bounds=, num_valid=)` -- the filled slots first (a stable partition),
+  `num_valid` = their count, the box = their own (`jaccpot.escapers.live_bounds`); the empty slots are in no leaf and
+  outside the box. Bucket leaves take no cut: the empty slots are folded onto a filled one (massless, same box).
+- `prepare_star_provider` (the eager prepare) and `_star_replanned` (a star-tree re-plan): the same, under jaccpot's
+  `eager_live_rows(n_filled)` (the eager cell build over the live rows, as the traced cut).
+- The target walks at the star slots (the stars' field on the galaxy's topology with a reserve, the coupling walk)
+  take `point_mask` = filled slots (HH4c did this on the mesh): an empty slot is no target, does not stretch the
+  target groups' Morton box, and gets zeros.
+
+Why not HH4b's re-park (move empty slots co-moving inside the member radius)? It keeps the empty slots IN the tree
+(their positions still shape its box and leaves), so it is not physics-neutral on the fused lane (below), and it
+changes the state. The cut removes them from the tree: the field does not depend on where they are, by construction.
+
+**Gates** (CPU, this host, `hh5/scripts/gate1_fused.py`, `runs/g1/`; the HH3b/HH2b strip system: Plummer 512 + 3 x 32
+x4-inflated, the galaxy preset's CPU route, leaf 16, p4, `run_segments` 4 edges x 2 steps, reserve 1 -> 79 -> 158,
+96 stars stripped):
+
+| comparison | result |
+|---|---|
+| no empty slot: the cut tree vs the plain `rebuild(xs, ms)` | **bitwise** (`test_empty_slots_do_not_shape_the_star_tree`, strict) |
+| empty slots in place vs moved far out (3 kpc-scale offsets): the slow accelerations of the galaxy and the filled slots, the verdict | **bitwise**, capacities hold (same test) |
+| tip run vs tip run with HH4b's re-park after every transfer | only the empty slots' own position/velocity differ; every galaxy and member array, `cluster_acc`, membership, ledger **bitwise** |
+| main run vs main run with the re-park | the physics moves (galaxy acceleration 1.1e-6 abs): **the re-park is not physics-neutral on the fused lane** (HH4b's bitwise test was on the direct reference force) |
+| main vs tip, `coupling="direct"` and `"fmm"` | identical stripping (79 / 17 / 0 / 0, the same stars), `cluster_acc` **bitwise**, ledger to 4e-16; 18 / 2010 galaxy accelerations differ, max 4.5e-7 of their row (the back-reaction's inner walk on a tree without the 79-96 parked slots); positions <= 6e-9 relative |
+| direct reference force (`DirectClustersForce`, `DirectMeshClustersForce`; 1 / 2 / 4 forced devices) | unchanged code: bitwise by construction |
+
+So the physics is bitwise wherever no slot is empty (every run up to its first stripping edge) and independent of the
+empty slots, bitwise; against main, after the first stripping edge, the fused lane differs at the star tree's FMM
+error level -- main's tree held the parked slots, so no fix that takes them out can be bitwise to it.
+
+**Odisseo (PR vepe99/Odisseo#49) can drop its workaround** (`install_empty_slot_repark`, `clusters_scheme(repark_empty=
+True)`): with this nornax the re-park is physics-neutral (bitwise, above) and has nothing left to do. The private hooks
+it wraps (`ClustersRunnerScheme.edge`, `_edge_progs(slow).transfer`) keep their signatures, so its fail-loud guard does
+not fire; set `repark_empty=False` (or remove it) once the nornax pin has this section.
+
+### 17.2 Re-plans grow only what failed, with headroom (HH4b request 3, HH4c open issue 4)
+
+- `FusedClustersForce.replanned(state, failed=)`: ONLY the parts that failed their verdict grow, to
+  `REPLAN_GROWTH` (2.0; `prepare(replan_growth=)`) times the failed need; the parts that fitted keep their plans and
+  providers (no re-prepare). A target plan: `TargetPlan.grown(need, 2)`; the back-reaction: grown from its needs and
+  re-sized at the failed state (merged); the star tree / the galaxy's caps: jaccpot's `provider.replanned` alone, its
+  walk list counts scaled so the lists land at 2x the need (jaccpot then applies its own
+  `JACCPOT_FLAT_WALK_CAP_HEADROOM`). A failed part with nothing to grow from falls back to the full re-plan
+  (`last_replan` on the new force says which). The start's plans keep the prepare's `headroom` (1.5).
+- `FusedMeshClustersForce`: the same for its target parts (`_grown_only`; the stars' and coupling plans from their
+  needs, the back-reaction and the star tree from one plans-only prepare at the failed state); the galaxy's mesh force
+  is re-prepared only if its own caps failed (HH4c's galaxy-only path).
+- The stripping candidates and the transfer compile once per scheme (`EdgeView`: what a transfer reads of the force),
+  not once per re-planned force. The segment and the refresh recompile (their plans' shapes changed).
+
+**Counts** (TBD-COUNTS)
+
+### 17.3 Restores (HH4b request 2)
+
+`ClustersRunnerScheme.restore` installs the record's tree bounds on the solvers (jaccpot's new
+`jaccpot.carried.install_recorded_tree`: leaf capacity, depth bound) BEFORE it re-prepares the force, as
+`ProductionRunner`'s own restore does, and jaccpot's pinned trace state now carries each engine's static target-block
+cap and preflight key. Details and gates in jaccpot `## HH5`. Odisseo's `patch_jaccpot_csr_restore_preflight` is no
+longer needed.
+
+### 17.4 `coupling="fmm"` with one cluster (HH4a item 4)
+
+**Where it went.** `coupling="fmm"` is the star tree's field at the star slots (a target walk with the galaxy's
+softening) minus each cluster's own field (an exact direct sum, `_own_field`). At `eps_g >> r_c` every pair inside a
+cluster is a NEAR pair of that walk, and then subtracted again exactly: two `O(K M^2)` sums. With ONE cluster there is
+no other cluster, so the whole term is the FMM's residual on the cluster's own pairs -- pure cost. Measured
+(`hh5/scripts/coupling_share.py`, `runs/cc/`; galaxy Plummer 2e4, one Plummer cluster `r_c` 0.012, `eps_g` 0.01,
+the galaxy preset's CPU route, star leaf 64, p4; CPU host at load ~80, so the times are indicative, the counts exact):
+
+| M | slow step none / fmm | star rebuild | coupling walk (+ rebuild) | own field (pairs) | walk needs far / near |
+|---|---|---|---|---|---|
+| 1024 | 67.9 / 70.7 s | 1.1 s | 2.2 s | 0.006 s (1.0e6) | 437 / 2,395 |
+| 4096 | 98.5 / 101.3 s | 0.9 s | 4.8 s | 0.13 s (1.7e7) | 6,253 / 32,268 |
+
+The walk's near needs grow as `M^1.9` (x13.5 for x4 stars): `O(M^2)`, as the own sum. Extrapolated to `M = 1e5` that is
+~1.9e7 near entries (~4e10 pair evaluations at group 32 x leaf 64) plus 1e10 own pairs -- HH4a's ~60 s per slow step
+on a contended A100 (77 s vs 17 s with `"none"`). The star tree's rebuild is shared with the back-reaction.
+
+**Fixed for K = 1** (`FusedClustersForce._coupling_field`): with one cluster the coupling is exactly zero and no
+coupling plan is made (`prepare`). `couples_clusters` is unchanged (it decides the ledger's pairs, of which there are
+none with one cluster), so the physics is `coupling="none"`'s, exactly -- the residual noise term is gone. On the mesh with `ndev > 1` the force does not know `K` (it sees `ndev x slots` blocks):
+the term is still evaluated there.
+
+**K > 1: the design, not built.** The cost is the own-cluster pairs, walked and subtracted. A grouped coupling skips
+them: for cluster `k`'s stars, every OTHER cluster `j` contributes its multipole (HH3a's `SourceGroups`: P2M about its
+COM, M2P) when the stars lie beyond `r_in_j`, and its stars directly (or through the star tree restricted to `j`'s
+rows) when inside. That is HH3a's back-reaction with the targets' own group masked out: `O(K^2 M)` M2P plus the close
+pairs, no `O(K M^2)` term. It needs a group-exclusion mask in jaccpot's `target_field(groups=)` (the evaluation of
+`SourceGroups` at points that belong to a group) -- a jaccpot change, sized for HH6. Until then, for bundles of compact
+clusters far apart, `coupling="none"` is the cheap choice; `"fmm"` costs about the internal sums' order.
