@@ -1194,9 +1194,8 @@ def _measure_cross(
     gal: Any, layout: MeshLayout, x: Any, m: Any, counts: Any
 ) -> np.ndarray:  # pragma: no cover - jaccpot
     """The galaxy force's cross needs at these rows (host, max over the mesh)."""
-    from jax.sharding import PartitionSpec as P
-
     from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+    from jax.sharding import PartitionSpec as P
 
     ax = layout.axis_name
     seed = gal.force_scale_seed if gal.scale_carry else None
