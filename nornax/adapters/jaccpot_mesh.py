@@ -130,6 +130,22 @@ class MeshCarry:
     strip_transfers: int = 0
 
 
+def _steps_key(scheme: Any) -> tuple:
+    """HH4a's adaptive internal steps (``ClusterHybridHermite.steps``) in the key, when set.
+
+    The internal flow is per cluster and runs on the device that owns it, so the
+    mesh carries it unchanged.
+    """
+    steps = getattr(scheme, "steps", None)
+    return () if steps is None else (repr(steps),)
+
+
+def _steps_record(scheme: Any) -> dict:
+    """``{"steps": repr}`` when the scheme has adaptive internal steps, else ``{}``."""
+    steps = getattr(scheme, "steps", None)
+    return {} if steps is None else {"steps": repr(steps)}
+
+
 def _fused_partition(solver: Any) -> Any:  # pragma: no cover - jaccpot
     """The fused mesh force's partition (jaccpot's Morton ranges in its box), unprepared."""
     from jaccpot.distributed.clusters_mesh import MortonPartition
@@ -302,7 +318,7 @@ class MeshClustersRunnerScheme:
             tuple(sorted((k, repr(v)) for k, v in dict(self.options).items())),
             None if self.mesh is None else int(self.mesh.devices.size),
             repr(self.partition),
-        )
+        ) + _steps_key(self.scheme)
 
     def record(self) -> dict:
         """The configuration as JSON (``meta`` and the fingerprint).
@@ -331,6 +347,7 @@ class MeshClustersRunnerScheme:
             "shape": [K, M],
             "ndev": None if self.mesh is None else int(self.mesh.devices.size),
             "partition": repr(self.partition),
+            **_steps_record(self.scheme),
         }
 
     def _factory(self) -> Callable:

@@ -472,3 +472,16 @@ def test_plan_max_takes_the_larger_capacities():
     got = plan_max(a, b)
     assert got == Plan(10, Inner(9), 0.5, False)
     assert plan_max(None, b) is b and plan_max(a, None) is a
+
+
+def test_adaptive_steps_ride_in_the_key_and_record():
+    from types import SimpleNamespace
+
+    from nornax.adapters.jaccpot_mesh import _steps_key, _steps_record
+
+    assert (
+        _steps_key(SimpleNamespace()) == () and _steps_record(SimpleNamespace()) == {}
+    )
+    s = SimpleNamespace(steps="aarseth(eta=0.02)")
+    assert _steps_key(s) == ("'aarseth(eta=0.02)'",)
+    assert _steps_record(s) == {"steps": "'aarseth(eta=0.02)'"}
