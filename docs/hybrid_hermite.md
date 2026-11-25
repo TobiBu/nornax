@@ -993,6 +993,7 @@ noted; scripts and logs `mn-scratch/hh4c/{scripts,runs}`.
 | 3. fused mesh lane, 2 devices: orbax per edge, FRESH-process resume at edge 2 | **0 / 23 arrays differ**, `restored["bitwise"]` |
 | 2. fused mesh lane, 2 devices, x4-inflated (all stars leave by edge 2) | galaxy rel-L2 vs card 8.5e-4, membership identical (76 / 96), ledgered drift <= 1.3e-6 (card 1.9e-6), momentum 9.4e-10 (1.6e-9) |
 | 3. orbax checkpoint per edge, FRESH-process resume at edges 1 and 2 (23 stars stripped at edge 1) | **0 / 19 arrays differ**, `restored["bitwise"]`, no mismatches: direct reference at 2 and 4 devices; fused at 1 device |
+| 2. GPU, 2 shared A100s vs one card (functional, contended; HH3b gate 5's system: galaxy 1e6 Hernquist, `dehnen_error`, p6 + 10 x 1e4 Plummer clusters, cross + coupling fmm, reserve 4096 per device, 3 x 5 steps; `hh4c/scripts/gate_gpu.py`) | membership **identical** at the end (the same 1037 stripped stars by id; 991 / 992 at edge 1, 1023 at edge 2); slow accelerations at the final state vs one card: stars 3.2e-4, galaxy 2.1e-4; positions 9.5e-7 apart (fp32 state); ledgered drift <= 3.5e-8 (card 1.4e-8), momentum drift <= 3.5e-9 (1.8e-9); 8 clusters on device 0, 2 on device 1; one re-plan (the star tree, after the first stripping edge); device peak 1.77 / 1.72 GB |
 | default path | jaccpot `provider_hlo_identity compare w8-main-cpu hh4c-tip-cpu` PASS 36/36 |
 
 **Learned.** Empty slots must not be targets of the stars' walks: after a re-assignment a device's unused slots
