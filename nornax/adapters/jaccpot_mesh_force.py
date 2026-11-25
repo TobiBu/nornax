@@ -898,9 +898,9 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
         back_options : dict | None
             ``FusedClustersForce.prepare``'s.
         cross_caps : Any
-            The galaxy's cross-domain capacities (``None``: jaccpot's
-            jaccpot's sizing, ``"auto"``: measured at the start, as its mesh runner does;
-            a retry grows them).
+            The galaxy's cross-domain capacities (``None``: jaccpot's sizing,
+            ``"auto"``, measured at the start as its mesh runner does; a retry
+            grows them).
 
         Returns
         -------
