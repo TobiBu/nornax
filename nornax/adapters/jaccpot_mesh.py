@@ -130,6 +130,14 @@ class MeshCarry:
     strip_transfers: int = 0
 
 
+def _fused_partition(solver: Any) -> Any:  # pragma: no cover - jaccpot
+    """The fused mesh force's partition (jaccpot's Morton ranges in its box), unprepared."""
+    from jaccpot.distributed.clusters_mesh import MortonPartition
+
+    engine = getattr(solver, "_impl", solver)
+    return MortonPartition(cubic=bool(getattr(engine, "_tree_cubic_bounds", False)))
+
+
 def _direct_or_fused(slow: Any) -> str:
     return type(getattr(slow, "inner", slow)).__name__
 
@@ -379,15 +387,25 @@ class MeshClustersRunnerScheme:
             layout, (xg, vg, mg), self.clusters, self.star_id, time=float(t0)
         )
         part0 = self.partition if self.partition is not None else None
-        slow, aux = self._factory()(
-            self, solver, settings, layout, raw, partition=part0
-        )
-        partition = self._partition(slow)
-        if layout.ndev > 1:
-            raw = migrate_start(layout, self.scheme, partition, raw)
+        known = part0
+        if known is None and self.slow_factory is None and layout.ndev > 1:
+            known = _fused_partition(solver)  # the default force's own, no prepare
+        if layout.ndev > 1 and known is not None:
+            # the rows to their owners first, then ONE prepare at the owned rows
+            raw = migrate_start(layout, self.scheme, known, raw)
             slow, aux = self._factory()(
                 self, solver, settings, layout, raw, partition=part0
             )
+        else:
+            slow, aux = self._factory()(
+                self, solver, settings, layout, raw, partition=part0
+            )
+            if layout.ndev > 1:  # a custom force naming its own partition
+                raw = migrate_start(layout, self.scheme, self._partition(slow), raw)
+                slow, aux = self._factory()(
+                    self, solver, settings, layout, raw, partition=part0
+                )
+        partition = self._partition(slow)
         carry = MeshCarry(ms=None, layout=layout, slow=slow, n_galaxy=n_g)  # type: ignore[arg-type]
         with self._pinned(carry):
             carry.ms = start_mesh(
