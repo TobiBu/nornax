@@ -1283,7 +1283,20 @@ not fire; set `repark_empty=False` (or remove it) once the nornax pin has this s
 - The stripping candidates and the transfer compile once per scheme (`EdgeView`: what a transfer reads of the force),
   not once per re-planned force. The segment and the refresh recompile (their plans' shapes changed).
 
-**Counts** (TBD-COUNTS)
+**Counts** (CPU, `hh5/scripts/replan_count.py`, `runs/rc/`): HH4b's Pal 5 setup reduced -- the a4 MW subsampled to
+2e4, Pal 5 King M = 256 at its 1-Gyr back point with its mass / 8 so it dissolves within the run, the GC layer's solvers
+(`odisseo.globular_clusters.build_solvers`: galaxy preset CPU route, the star tree geometric 0.5 with leaf headroom 2),
+`coupling="fmm"`, reserve 256, dt 2e-3, 16 segments x 10 steps, `ProductionRunner(scheme=ClustersRunnerScheme)`. Re-plans
+= segment retries + edge re-plans; compiles = XLA backend compilations of the whole process (`jax.monitoring`).
+
+| arm | re-plans (where) | XLA compiles | compile time | stripped |
+|---|---|---|---|---|
+| main, no re-park | 7: star tree x4 (3 retries of segment 2 -- its `max_retries` -- and segment 3), back-reaction x3 (retries of segments 13, 15; the dissolution's refresh) | 2016 | 1950 s | 256 (dissolved at 16) |
+| main + HH4b's re-park (HH4b's production configuration) | 5: star tree x4 (edge 6's refresh, segment 11, segment 15 + its refresh), back-reaction x1 (the dissolution's refresh) | 1967 | 1651 s | 256 (dissolved at 16) |
+| this branch, no re-park | **1**: the back-reaction at the dissolution's refresh (targeted: that plan alone) | **733** | **545 s** | 256 (dissolved at 16) |
+
+The stripping history is the same (29 / 42 / 47-48 / 54-55 / 104 / 168 / 201 / 215 ... / 256) and the ledgered drift
+agrees to two digits. On the GPU (section 17.1's table) the 1e6 + 4096 run had no re-plan at all in 12 segments.
 
 ### 17.3 Restores (HH4b request 2)
 
