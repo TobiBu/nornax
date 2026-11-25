@@ -707,7 +707,7 @@ class ClustersRunnerScheme:
             repr(self.scheme.internal),
             None if self.policy is None else repr(self.policy),
             tuple(sorted((k, repr(v)) for k, v in dict(self.options).items())),
-        )
+        ) + (() if self.scheme.steps is None else (repr(self.scheme.steps),))
 
     def record(self) -> dict:
         """The configuration as JSON (``meta`` and the fingerprint)."""
@@ -728,7 +728,7 @@ class ClustersRunnerScheme:
             "policy": pol,
             "options": {k: repr(v) for k, v in sorted(dict(self.options).items())},
             "shape": [K, M],
-        }
+        } | ({} if self.scheme.steps is None else {"steps": repr(self.scheme.steps)})
 
     # --------------------------------------------------------------- programs
     def _progs(self, slow: Any, dt: float, steps: int) -> _Programs:

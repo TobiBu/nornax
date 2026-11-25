@@ -1,4 +1,4 @@
-# Hybrid Hermite: direct-sum clusters inside an FMM galaxy (design note, sessions 1-3)
+# Hybrid Hermite: direct-sum clusters inside an FMM galaxy (design note, sessions 1-4)
 
 Multi-node accuracy plan, decision U6 (2026-11-03). The science driver is
 **globular clusters with direct-sum internal dynamics inside a live Milky Way**:
@@ -13,7 +13,8 @@ jaccpot `target_points`, and the gates of section 5. Session 2 (2026-11-15) adds
 many clusters (section 8), stripping (section 9) and the hybrid's default galaxy
 criterion (section 10), with its gates in section 11. Section 12 plans session 3+;
 session 3 (2026-11-21) adds many clusters at production scale (track HH3a, section 13) and
-the runner integration (track HH3b, section 14).
+the runner integration (track HH3b, section 14); session 4 (2026-11-24) adds adaptive (Aarseth) internal steps
+(track HH4a, section 15).
 
 ## 0. User direction (2026-11-11, relayed by the lead; binding for session 1, not a final design lock)
 
@@ -184,7 +185,8 @@ Properties of the scheme:
 - **Time symmetry.** It is time-symmetric up to Hermite's corrector (Hermite-4
   PEC is not exactly time-symmetric).
 - **Momentum.** See section 1.
-- **Step hierarchy.** Session 1 has one shared internal step. Aarseth individual
+- **Step hierarchy.** Session 4 adds individual (Aarseth) block steps per cluster,
+  opt-in (section 15). Session 1 has one shared internal step. Aarseth individual
   steps inside the flow are session 2: the smoke run at eps_c = 1e-4 (100 stars,
   r_c 0.01) lost 3.8 % of its internal energy in 10 slow steps to close encounters
   at a fixed step. The gates below use eps_c = r_c / 10 or r_c / 20.
@@ -442,7 +444,7 @@ own pairs are collisional.
 **What is batched and what is not.** The internal direct sums are padded to `M_max`: clusters of very different sizes
 waste `K M_max^2 - sum M_k^2` pair evaluations. Bucketing clusters by size (one batch per bucket) is a session-3
 option if it binds. Clusters share the slow step; each has its own fixed internal step `dt / n_sub` (Aarseth steps:
-section 12).
+section 15).
 
 ## 9. Stripping (session 2)
 
@@ -705,7 +707,8 @@ The 1e5 + 1e4 FMM run was not repeated with ferrers3 (GPU time, see the report).
    - A stripped star joins the owning rank's tree rows (its mesh capacity reserve), and migrates like any particle
      after that.
    - The ledger's jump is per rank, summed at the edge.
-3. **Adaptive internal steps.** Aarseth block steps inside the fast flow (nornax `blockstep` + `AarsethController`),
+3. **Adaptive internal steps.** DONE (HH4a, section 15: `ClusterHybridHermite(steps=AarsethSteps(...))`). The plan
+   was: Aarseth block steps inside the fast flow (nornax `blockstep` + `AarsethController`),
    synchronised at each slow step, per cluster (each cluster its own rung distribution; `lax.map` over clusters
    keeps them independent). Gate: a cluster's internal energy over 100 crossing times at `eps_c -> 0`. A GPU
    direct-sum Hermite kernel (Pallas) if the `O(K M^2)` sum binds at `M = 1e5`.
@@ -875,3 +878,199 @@ Details are in jaccpot `docs/production_2026-11.md` `## HH3b`. Test: `test_donat
 
 **Not in session 3**: the mesh (the runner refuses the clusters there), Aarseth steps, the GC science layer, HoreKa
 timing, the physics choices (today's defaults).
+
+## 15. Adaptive (Aarseth) internal steps per cluster (session 4, HH4a)
+
+Section 12 item 3. Opt-in: the fixed `n_sub` flow stays the default, its programs and results unchanged.
+
+**API.**
+
+```python
+from nornax.hybrid_steps import AarsethSteps
+
+scheme = ClusterHybridHermite(
+    split=MembershipSplit(DirectSumGravity(G=1.0, softening=eps_c, block_size=1024)),
+    steps=AarsethSteps(eta=0.02, max_rung=16, min_rung=0, target_block=64),
+)
+```
+
+- `steps=None` (default): the fixed `n_sub` Hermite-4/6 steps. With an `AarsethSteps`, `n_sub` is unused. The adaptive
+  flow is Hermite-4 only: `order=6` is refused (a Hermite-6 block scheme needs the sources' predicted acceleration and
+  jerk for the snap; see "Not built" below).
+- `HybridHermite` (one cluster) takes the same `steps=`.
+- `ClusterHybridHermite.fast_flow_stats(clusters, dt) -> (clusters, BlockFlowStats)`: the flow and its per-cluster
+  counts (`blocks`, `evals`, `pairs`, `max_rung`, `clamped`). `fast_flow` and `step` drop the counts.
+- The core is `nornax.hybrid_steps.aarseth_block_flow(cluster, dt, model, steps)` on one `[M]` cluster.
+- `AarsethSteps`:
+  - `eta`: Aarseth's accuracy parameter;
+  - `max_rung`: the finest step is `dt / 2**max_rung`. A star that wants a finer one is held there and counted in
+    `clamped`;
+  - `min_rung`: the coarsest step is `dt / 2**min_rung`. `min_rung == max_rung` holds every star on one rung, which is
+    the fixed flow with `n_sub = 2**max_rung`;
+  - `target_block`: `None` evaluates all `M` targets at every block time (the fixed flow's arithmetic); an int `B`
+    evaluates only the active stars, `B` targets at a time against all `M` sources (needs a `DirectSumGravity`).
+
+**The schedule** (Makino & Aarseth 1992 block steps, inside one slow step `dt`):
+
+- Time is counted in integers of the finest step `h = dt / 2**max_rung`. A star on rung `k` steps by `2**(max_rung-k)`
+  units, so the schedule is exact.
+- At the slow step's start every star's acceleration, jerk, snap and crackle are evaluated exactly (one direct sum
+  with `max_order=4`; in the coupled scheme it replaces the fixed flow's derivative refresh after the opening kick).
+  The initial rung comes from Aarseth's criterion
+  `dt_i = sqrt(eta (|a||a2| + |a1|^2) / (|a1||a3| + |a2|^2))`, rounded down to a power of two:
+  `k = ceil(log2(dt / dt_i))`, clipped to `[min_rung, max_rung]`.
+- Each iteration of a `lax.while_loop` (the block times):
+  - the next block time is `T = min_i(t_i + dt_i)`, and the stars with `t_i + dt_i = T` are active;
+  - every star is predicted to `T` (Taylor through the jerk): these are the sources;
+  - the active stars get their acceleration and jerk from the direct sum, and are corrected with Hermite-4's
+    corrector over their own step (the formulas of `hermite4_step`);
+  - the new rung uses snap and crackle from the step's Hermite interpolation. A star may move to a finer rung after
+    any step, and to the next coarser rung only when `T` is a multiple of the coarser step.
+- The loop ends at `T = 2**max_rung`: every star is synchronised at the slow step's end. The slow kicks stay Strang
+  at the slow step (`K_slow(dt/2) D_fast(dt) K_slow(dt/2)`), as before.
+- **Nothing new is carried.** Rungs are re-derived at every slow step's start, so the carry, `ClustersRunnerScheme`'s
+  checkpoints and the restarts keep the fixed mode's layout. The runner's `record()`/`key()` gain `steps` only when
+  it is set: a checkpoint of one mode restores into the other with the mismatch `scheme` reported.
+- Empty slots sit on `min_rung` with zero derivatives. They stay where they are and are not counted.
+- **Forward only.** Reverse-mode autodiff through a `while_loop` is not defined; the fixed flow (a `scan`) stays the
+  differentiable one.
+
+**Per cluster: `lax.map`, not a masked `vmap`.** In the adaptive mode `cluster_batch=None` (or 1) maps the clusters
+one at a time, so each runs its own block-time loop: a cluster's trip count is its own, and the compacted-target
+`cond` stays a real branch. Under a `vmap`, the loops of a batch run in lockstep until the slowest cluster is done (a
+quiet cluster pays for a binary in another), and the `cond` becomes a select that evaluates both branches. An int
+`cluster_batch = b > 1` still runs `b` clusters in lockstep, for many small clusters on a GPU, where one cluster's
+`B x M` block cannot fill the card.
+
+**Compacted targets.** With `target_block=B` the active stars are gathered (a stable argsort of the active mask) and
+evaluated in a `while_loop` over `ceil(n_active / B)` blocks of `B x M` pairs, so a block time costs
+`ceil(n_active / B) B M` pairs instead of `M^2`. When `ceil(n_active / B) B >= M` (the synchronised block times), it
+falls back to the internal force's own full (or blocked) evaluation. Without compaction (`target_block=None`) every
+block time costs `M^2`, as a fixed substep does: then the adaptive steps buy accuracy, but no work.
+
+### Gates (HH4a, 2026-11-24)
+
+Numbers from `mn-scratch/hh4a/` (scripts, runs and `REPORT.md`). CPU runs are float64 on a shared 64-core host;
+GPU runs are functional only (shared A100s, contended: no timing claims).
+
+1. **An isolated cluster** (`gate1.py`; Plummer, `N = 1e3`, Henon units, `t_cr = 2 sqrt(2)`, slow step `t_cr / 8`, 100
+   `t_cr`; evaluation counts include the start evaluation through crackle, counted twice). `|dE/E|` at 100 `t_cr`:
+
+   | `eps_c` | adaptive, `eta` = 0.04 / 0.02 / 0.01 / 0.005 | evals / M / slow step | fixed `n_sub` at equal totals | `|dE/E|` |
+   |---|---|---|---|---|
+   | `a / 200` | 2.9e-5 / 1.4e-6 / 2.8e-7 / 9.8e-8 | 47 / 66 / 94 / 129 | 42 / 59 / 83 / 116 | 0.43 / 0.32 / 0.27 / 0.15 |
+   | `a / 20` | 2.0e-4 / 3.6e-5 / 6.8e-6 / 1.2e-6 | 30 / 42 / 58 / 82 | 31 / 43 / 60 / 84 | 1.3e-3 / 3.0e-4 / 6.7e-5 / 1.2e-5 |
+
+   - The error converges with `eta` (about `eta^2.5`) and no rung was clamped (`max_rung` 16; the finest used was
+     13-14 at `a / 200`).
+   - At equal evaluation count, a shared step fails at `a / 200`: the close encounters in the core need steps a
+     thousand times shorter than the median. At `a / 20` the adaptive steps are about 10x more accurate.
+   - The adaptive cost grows as the core contracts: 455k evaluations per `t_cr` at the start, 1.19M at 100 `t_cr`
+     (`eta` 0.005, `a / 200`).
+   - **A hard binary** (stars 0 and 1 on a circular orbit, `a_b = 1e-3`, `eps_c = 1.2e-4`, about 3 kT; 20 `t_cr`):
+     adaptive `|dE/E|` 9.7e-5 (finest rung 19 of 20, none clamped, 87.5 evaluations / M / slow step). Fixed
+     `n_sub = 70` (equal count) ends at 4.7 and `n_sub = 280` (4x the count) at 3.7: the binary is blown apart in the
+     first `t_cr`. In the adaptive run the pair itself did not survive either: an encounter in the core broke it
+     while the energy held.
+2. **Limits** (`tests/unit/test_hybrid_steps.py`):
+   - Every star held on rung `k` (`min_rung = max_rung = k`) reproduces the fixed flow with `n_sub = 2**k`. The
+     formulas are the same, but the program is different: a `while_loop` body instead of a `scan` body. On this host
+     the result is bitwise at `M = 40` and within 1 ulp at `M = 24` (5 of 216 elements). The tests use a few-ulp bound.
+     This holds through the scheme's step (galaxy, slow kicks) and for `HybridHermite`, and on jaccpot's fused lane
+     (`test_adaptive_steps_on_the_fused_lane`).
+   - `K` clusters mapped together equal `K` separate runs, with `lax.map` and with a lockstep batch of 2.
+   - The compacted targets equal the full evaluation within a few ulp, with the same evaluation counts and fewer
+     pairs.
+3. **Inside the hybrid** (`gate3.py`; hh2b gate 5's system: Hernquist galaxy + 10 Plummer clusters, `MC = 1e-4`,
+   `RC = 0.012`, `eps_c = RC / 20`, `eps_g = 0.005`, `dt = 2e-3`, cross and coupling `fmm`, `StrippingPolicy()`
+   defaults):
+   - **CPU** (`N_g = 2e4`, `M = 200`, the CPU route: galaxy preset, `dehnen`, leaf 64, p6; 6 edges x 5 steps; energy
+     every edge). Fixed `n_sub = 16` against `eta` = 0.04 / 0.02 / 0.01 / 0.005:
+     - membership is **identical** in all five: the same 19 stars stripped, with the same ids, and the same members;
+     - `max |dE/E|` 1.855e-7 (ledgered the same) and `dP` 8.1e-10 in all five: the galaxy sets them;
+     - the galaxy's end positions are bitwise equal (fp32 galaxy), and the clusters agree with the fixed run to
+       9e-11 (`eta` 0.005) to 1.5e-9 (`eta` 0.04);
+     - internal evaluations per cluster per slow step: 217 / 240 / 280 / 346 (mean over the edges; 202-438 per
+       cluster) against 3171 for `n_sub = 16`. The finest rung used was 3-4: at this `eps_c` the fixed run is about
+       10x over-resolved.
+   - **GPU** (`N_g = 1e6` with `galaxy_solver()`, `dehnen_error`, leaf 64, p6; `M = 1e3`; 4 edges x 5 steps; one
+     shared A100). Fixed `n_sub = 16` against `eta` 0.02:
+     - membership is **identical**: 101 stripped, with the same ids;
+     - `max |dE/E|` 8.40e-9 vs 8.39e-9 (ledgered the same), and `dP` 1.1e-10 in both;
+     - no re-plan at any edge, verdicts green, device peak 1.72 GB in both;
+     - the clusters end within 3.7e-10 of each other and the galaxy within 3.7e-9 (the GPU path is not run-to-run
+       deterministic without `--xla_gpu_deterministic_ops`, HH3b);
+     - internal evaluations per cluster per slow step: 1266 vs 15841.
+4. **Through the runner** (HH3b's gate-2 harness with an adaptive scheme, `eta` 0.02; `mn-scratch/hh4a/scripts/g4`):
+   - `ProductionRunner(scheme=ClustersRunnerScheme(... steps=AarsethSteps(...)))`, 4 segments, a restart at every edge,
+     continued in FRESH processes from segment 1 (79 transfers, reserve re-plan 1 -> 79), segment 2 (17 transfers,
+     79 -> 158) and segment 3;
+   - **bitwise** (every array, every diagnostics row, `restored["bitwise"]`) for `.npz`, for orbax directories, and for
+     `.npz` with escapers and stripping together;
+   - ledgered drift <= 3.9e-6, momentum 6.6e-9 (with escapers: <= 1.05e-6);
+   - the host-copy retry: `test_adaptive_steps_donated_segments_rerun_from_the_host_copy_bitwise` (unit). The runner
+     == `run_segments` and the `.npz` restart are also tests: unit (`DirectClustersForce`) and integration (jaccpot,
+     `solver-tests-runner`).
+5. **The default path**: every existing nornax test passes unchanged, and strict mode
+   (`NORNAX_HYBRID_STRICT_BITWISE=1`) holds. The fixed `step` makes the same calls in the same order (the derivative
+   refresh after the kick is only skipped in the adaptive mode). No jaccpot change.
+
+### The O(K M^2) internal sum's share (item 4)
+
+Galaxy `N_g = 1e6` (`galaxy_solver()`, `dehnen_error`, leaf 64, p6) + `K` clusters (`MC = 1e-4`, `RC = 0.012`,
+`eps_c = RC / 20`, `dt = 2e-3`), one A100 (contended: rough shares only). The fixed flow makes `17 K M^2` pairs per slow
+step (16 substeps + the refresh after the kick); the adaptive one (`eta` 0.02, `target_block` 64) makes the measured
+`pairs` + `K M^2` (the start evaluation through crackle, which costs about 2x).
+
+| `K x M` | slow force | fixed 16: internal | share | adaptive: internal | share | pairs fixed / adaptive |
+|---|---|---|---|---|---|---|
+| 1 x 1e3 | 0.36 s | 1.8 ms | 0.5 % | 2.3 ms | 0.6 % | 1.7e7 / 2.6e6 (8 block times, finest rung 3) |
+| 10 x 1e3 | 4.3 s | 8.4 ms | 0.2 % | 16 ms | 0.4 % | 1.7e8 / 2.6e7 |
+| 1 x 1e4 | 18 s (noisy) | 0.20 s | ~4 % | 0.20 s | ~4 % | 1.7e9 / 2.2e8 |
+| 1 x 1e5 | 77 s | 9.2 s | 10 % | 2.6 s | 3 % | 1.7e11 / 2.1e10 (5 block times, finest rung 3) |
+| 1 x 1e5, `coupling="none"` | 17 s | 9.2 s | 35 % | 2.6 s | 13 % | as above |
+
+- **The internal sum does not bind**, even at `M = 1e5`. With `coupling="fmm"` the slow force dominates: 77 s with
+  one 1e5-star cluster, against 17 s with `coupling="none"`, so the coupling costs about 60 s at that size (worth a
+  look by the slow force's owners; not this track's). With `coupling="none"`, fixed `n_sub = 16` takes 35 % of the
+  step and the adaptive steps 13 %.
+- At `M = 1e3` on a GPU the adaptive flow's wall time is about 2x the fixed one, despite 6.6x fewer pairs. Its block
+  times are a loop of small launches, so it is launch-bound. It pays off where the pairs dominate (large `M`, close
+  encounters) and where accuracy needs it (gate 1).
+- The 1e4 row is noisy: its slow force timed alone came out longer than the whole step. All rows are contended.
+
+### A GPU direct-sum Hermite kernel (Pallas): design, deferred
+
+The internal sums today are XLA's: `DirectSumGravity` builds `[targets, sources, 3]` pair tensors (blocked by
+`block_size` rows), and the compacted path builds `[B, M, 3]` blocks. Each pair needs `dr`, `dv`, `r^-3`, the
+acceleration and the jerk (about 30 flops in fp64) but XLA materialises several `B x M x 3` intermediates in HBM: the
+sum is memory-bound, not flop-bound. A Pallas (Triton) kernel would keep the pair work in registers:
+
+- **Grid:** one program per block of `T` targets (`T` = 64-128) with the sources streamed through shared memory in
+  tiles of `S` (`S` = 128-256): `x, v, m` of the sources (7 words), the target's `x, v` in registers, the
+  accumulators `a, j` (6 words) per target. No `T x S` tensor ever reaches HBM.
+- **Compacted targets for free:** the program takes the gathered active rows (`order[:n_active]` padded to `T`) and
+  a grid of `ceil(n_active / T)`, so the block-step loop's cost is the active stars' `n_active M`, not `M^2`. The
+  grid size is dynamic, so it is a fixed-size grid of `ceil(M / T)` programs, each exiting early past `n_active`
+  (Pallas has no dynamic grid); that is the same early exit the walk kernels use.
+- **Masks** (empty slots, self pairs) as a source mass of zero and an index compare; softening as now.
+- **fp64.** The clusters are float64 (the Hermite corrector's cancellations). On an A100 fp64 is a quarter of fp32's
+  rate but is the right precision here; a mixed form (fp32 `dr`/`r^-3`, fp64 accumulation) is an option to measure.
+- **Snap/crackle** (the start evaluation, Hermite-6): a second kernel over the same tiles with the sources' `a, j`.
+- **Batching clusters:** a leading grid axis over clusters (one program per (cluster, target block)), so many
+  small clusters fill the card in one launch instead of `lax.map`'s `K` sequential launches.
+
+It is not built. The measurement above shows the internal sum does not bind at `M = 1e5` (at most 35 % of a slow step
+with `coupling="none"`, 13 % with the adaptive steps), and the kernel (its masks, the clusters axis, fp64) is a
+session of its own, not a small change.
+
+### Not built
+
+- **Hermite-6 block steps.** The snap at an active star needs the sources' acceleration and jerk at the block time.
+  For the inactive stars those are predicted, not evaluated, so it is a different evaluation from `max_order=3` over
+  everything. `order=6` with `steps` is refused.
+- **Reverse-mode gradients** through the adaptive flow (a `while_loop`).
+- **Rung carry across slow steps.** Rungs are re-derived from an exact evaluation through crackle at every slow step;
+  it costs one evaluation per slow step and keeps the carry unchanged.
+- **Neighbour schemes** (Ahmad-Cohen) and regularisation (KS / chain) of hard binaries: with `eps_c -> 0` a hard
+  binary sets the finest rung for its whole slow step (a rung-19 pair in gate 1).
