@@ -993,7 +993,14 @@ GPU runs are functional only (shared A100s, contended: no timing claims).
      - internal evaluations per cluster per slow step: 217 / 240 / 280 / 346 (mean over the edges; 202-438 per
        cluster) against 3171 for `n_sub = 16`. The finest rung used was 3-4: at this `eps_c` the fixed run is about
        10x over-resolved.
-   - **GPU** (`N_g = 1e6`, `M = 1e3`): _queued on the shared cards; added when it lands._
+   - **GPU** (`N_g = 1e6` with `galaxy_solver()`, `dehnen_error`, leaf 64, p6; `M = 1e3`; 4 edges x 5 steps; one
+     shared A100). Fixed `n_sub = 16` against `eta` 0.02:
+     - membership is **identical**: 101 stripped, with the same ids;
+     - `max |dE/E|` 8.40e-9 vs 8.39e-9 (ledgered the same), and `dP` 1.1e-10 in both;
+     - no re-plan at any edge, verdicts green, device peak 1.72 GB in both;
+     - the clusters end within 3.7e-10 of each other and the galaxy within 3.7e-9 (the GPU path is not run-to-run
+       deterministic without `--xla_gpu_deterministic_ops`, HH3b);
+     - internal evaluations per cluster per slow step: 1266 vs 15841.
 4. **Through the runner** (HH3b's gate-2 harness with an adaptive scheme, `eta` 0.02; `mn-scratch/hh4a/scripts/g4`):
    - `ProductionRunner(scheme=ClustersRunnerScheme(... steps=AarsethSteps(...)))`, 4 segments, a restart at every edge,
      continued in FRESH processes from segment 1 (79 transfers, reserve re-plan 1 -> 79), segment 2 (17 transfers,
@@ -1018,8 +1025,19 @@ step (16 substeps + the refresh after the kick); the adaptive one (`eta` 0.02, `
 | `K x M` | slow force | fixed 16: internal | share | adaptive: internal | share | pairs fixed / adaptive |
 |---|---|---|---|---|---|---|
 | 1 x 1e3 | 0.36 s | 1.8 ms | 0.5 % | 2.3 ms | 0.6 % | 1.7e7 / 2.6e6 (8 block times, finest rung 3) |
+| 10 x 1e3 | 4.3 s | 8.4 ms | 0.2 % | 16 ms | 0.4 % | 1.7e8 / 2.6e7 |
+| 1 x 1e4 | 18 s (noisy) | 0.20 s | ~4 % | 0.20 s | ~4 % | 1.7e9 / 2.2e8 |
+| 1 x 1e5 | 77 s | 9.2 s | 10 % | 2.6 s | 3 % | 1.7e11 / 2.1e10 (5 block times, finest rung 3) |
+| 1 x 1e5, `coupling="none"` | 17 s | 9.2 s | 35 % | 2.6 s | 13 % | as above |
 
-_The rows for 10 x 1e3, 1 x 1e4 and 1 x 1e5 are queued on the shared cards; added when they land._
+- **The internal sum does not bind**, even at `M = 1e5`. With `coupling="fmm"` the slow force dominates: 77 s with
+  one 1e5-star cluster, against 17 s with `coupling="none"`, so the coupling costs about 60 s at that size (worth a
+  look by the slow force's owners; not this track's). With `coupling="none"`, fixed `n_sub = 16` takes 35 % of the
+  step and the adaptive steps 13 %.
+- At `M = 1e3` on a GPU the adaptive flow's wall time is about 2x the fixed one, despite 6.6x fewer pairs. Its block
+  times are a loop of small launches, so it is launch-bound. It pays off where the pairs dominate (large `M`, close
+  encounters) and where accuracy needs it (gate 1).
+- The 1e4 row is noisy: its slow force timed alone came out longer than the whole step. All rows are contended.
 
 ### A GPU direct-sum Hermite kernel (Pallas): design, deferred
 
@@ -1042,8 +1060,9 @@ sum is memory-bound, not flop-bound. A Pallas (Triton) kernel would keep the pai
 - **Batching clusters:** a leading grid axis over clusters (one program per (cluster, target block)), so many
   small clusters fill the card in one launch instead of `lax.map`'s `K` sequential launches.
 
-It is not built: the measurement (section above) decides whether the internal sum binds at `M = 1e5`; and the kernel,
-its masks, the clusters axis and fp64 make it a session of its own, not a small change.
+It is not built. The measurement above shows the internal sum does not bind at `M = 1e5` (at most 35 % of a slow step
+with `coupling="none"`, 13 % with the adaptive steps), and the kernel (its masks, the clusters axis, fp64) is a
+session of its own, not a small change.
 
 ### Not built
 
