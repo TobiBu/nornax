@@ -63,14 +63,14 @@ jobs:
   # jaccpot and yggdrax from GitHub at PINNED commits and runs those tests on CPU in
   # float64 (the fused-lane files run their Pallas kernels in interpret mode).
   #
-  # PINS: jaccpot main 42cd2840 (2026-11-25, #529's merge: the carried scheme's mesh
-  # form, MortonPartition and FusedMeshForce targets=, which MeshClustersRunnerScheme
-  # and FusedMeshClustersForce use; it has #527's donated segments and host-copy
-  # retry, which ClustersRunnerScheme's keep_start/restore_start serve, #525's grouped back-reaction
-  # SourceGroups, point_mask and TargetSources live rows, which FusedClustersForce
-  # uses, and #524's carried-scheme seam) and yggdrax ba82e37 (#110, the Pallas
-  # walk move; it has everything jaccpot main imports). Bump them together: jaccpot's
-  # `yggdrax>=0.0.1` and jax window (>=0.11.2,<0.12) are what the resolver
+  # PINS: jaccpot main a2add480 (2026-11-27, #531's merge: the carried restore keeps the
+  # writer's tree and static target-block preflight, which HH5's restore path
+  # (install_recorded_tree) uses; it has #532's opt-in LET exchange, #529's mesh form of
+  # the carried scheme, MortonPartition and FusedMeshForce targets=, #527's donated
+  # segments and host-copy retry, #525's grouped back-reaction SourceGroups, point_mask
+  # and TargetSources live rows, and #524's carried-scheme seam) and yggdrax main 24de6c3
+  # (#132; jaccpot's CI and the HoreKa bundle install yggdrax main). Bump them together:
+  # jaccpot's `yggdrax>=0.0.1` and jax window (>=0.11.2,<0.12) are what the resolver
   # reconciles.
   solver-tests:
     runs-on: ubuntu-latest
@@ -78,8 +78,8 @@ jobs:
     env:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
-      YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: 42cd2840bc508c3a020089ab1f0fcc41c79a2d84
+      YGGDRAX_REF: 24de6c334613d4d65c673b09f40c9a1d0ea2f378
+      JACCPOT_REF: a2add4808cc16878a5e284523565350038d0de93
 
     steps:
       - name: Checkout
@@ -121,8 +121,8 @@ jobs:
     env:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
-      YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: 42cd2840bc508c3a020089ab1f0fcc41c79a2d84
+      YGGDRAX_REF: 24de6c334613d4d65c673b09f40c9a1d0ea2f378
+      JACCPOT_REF: a2add4808cc16878a5e284523565350038d0de93
 
     steps:
       - name: Checkout
@@ -159,8 +159,8 @@ jobs:
     env:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
-      YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: 42cd2840bc508c3a020089ab1f0fcc41c79a2d84
+      YGGDRAX_REF: 24de6c334613d4d65c673b09f40c9a1d0ea2f378
+      JACCPOT_REF: a2add4808cc16878a5e284523565350038d0de93
 
     steps:
       - name: Checkout
@@ -197,8 +197,8 @@ jobs:
     env:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
-      YGGDRAX_REF: ba82e3771c8d1c4675b9812ef9793a3cd30eb3e4
-      JACCPOT_REF: 42cd2840bc508c3a020089ab1f0fcc41c79a2d84
+      YGGDRAX_REF: 24de6c334613d4d65c673b09f40c9a1d0ea2f378
+      JACCPOT_REF: a2add4808cc16878a5e284523565350038d0de93
 
     steps:
       - name: Checkout
