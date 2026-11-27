@@ -316,6 +316,66 @@ def test_cluster_coupling_through_the_star_tree_follows_the_direct_pairs():
     assert err < 5e-2, err
 
 
+def test_empty_slots_do_not_shape_the_star_tree():
+    """HH5 (section 17): the star tree is built over the filled slots only.
+
+    A stripped star's slot stays where the star left. Wherever such empty slots
+    are -- in place, or far out along the orbit -- the slow accelerations of the
+    galaxy and of the filled slots are the same BITWISE (the slot is in no leaf,
+    outside the box, no target), and the star tree's capacities hold. Main's tree
+    spanned the empty slots: its box followed them and its capacities overflowed.
+    """
+    from nornax.adapters.jaccpot_hybrid import _filled_cut, star_topology
+
+    xg, vg, mg, xc, vc, mc = _system()
+    reserve = 4
+    force, aux = _prepare(xc, mc, reserve=reserve, coupling="fmm")
+    scheme = ClusterHybridHermite(n_sub=N_SUB, split=_split())
+    st = jax.jit(
+        lambda a: scheme.initial_state(
+            force, galaxy=(xg, vg, mg), clusters=(xc, vc, mc), aux=a, reserve=reserve
+        )
+    )(aux)
+    empty = jnp.zeros(mc.shape, bool).at[0, :5].set(True).at[2, 7].set(True)
+    mc_e = jnp.where(empty, 0.0, mc)
+    far = jnp.where(empty[..., None], xc + jnp.asarray([3.0, -2.0, 1.5]), xc)
+
+    @jax.jit
+    def slow(xs):
+        a_g, a_c, out = force.cluster_slow_accelerations(
+            st.galaxy_positions, st.galaxy_masses, st.n_live, xs, mc_e, aux=st.aux
+        )
+        return a_g, jnp.where(empty[..., None], 0.0, a_c), out[2]
+
+    g0, c0, ok0 = slow(xc)
+    g1, c1, ok1 = slow(far)
+    np.testing.assert_array_equal(np.asarray(g1), np.asarray(g0))
+    np.testing.assert_array_equal(np.asarray(c1), np.asarray(c0))
+    assert bool(np.all(ok0)) and bool(np.all(ok1))
+    # the tree's box is the filled slots' own
+    cubic = bool(getattr(force.clusters.engine, "_tree_cubic_bounds", False))
+    _, _, n, box = _filled_cut(far.reshape(-1, 3), mc_e.reshape(-1), cubic)
+    assert int(n) == int(np.sum(~np.asarray(empty)))
+    filled = jnp.asarray(np.asarray(xc).reshape(-1, 3)[~np.asarray(empty).reshape(-1)])
+    own = _filled_cut(filled, jnp.ones(filled.shape[0]), cubic)[3]
+    for got, want in zip(box, own):  # the filled slots' own box, not the far ones'
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+    # nothing empty: the cut is the plain tree, bitwise
+    xs, ms = xc.reshape(-1, 3), mc.reshape(-1)
+    plan = force.coupling_plan
+    plain = jax.jit(
+        lambda: force.clusters.target_field(
+            force.clusters.rebuild(xs, ms), xs, plan, softening=SOFTENING
+        ).acc
+    )()
+    cut = jax.jit(
+        lambda: force.clusters.target_field(
+            star_topology(force.clusters, xs, ms), xs, plan, softening=SOFTENING
+        ).acc
+    )()
+    np.testing.assert_array_equal(np.asarray(cut), np.asarray(plain))
+
+
 def test_the_hybrid_galaxy_default_is_dehnen_error():
     assert HYBRID_GALAXY_MAC == "dehnen_error"
     assert galaxy_solver(softening=1e-2).advanced.mac_type == "dehnen_error"

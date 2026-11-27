@@ -47,6 +47,8 @@ from nornax.adapters.jaccpot_hybrid import (
     _kernel_field,
     _live_mask,
     _plan_back,
+    prepare_star_provider,
+    star_topology,
 )
 from nornax.hybrid_mesh import (
     AXIS_NAME,
@@ -517,7 +519,10 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
                 )
         ctopo = None
         if self.cross == "fmm" or self.coupling == "fmm":
-            ctopo = self.clusters.rebuild(xs_all, ms_all)
+            # over the filled slots only: the gathered empty slots (stripped
+            # stars' slots, every device's unused slots at the origin) neither
+            # stretch its box nor fill its leaves (section 17)
+            ctopo = star_topology(self.clusters, xs_all, ms_all)
             ok = ok.at[2].set(ok[2] & self.clusters.capacity_ok(ctopo))
         if not potential:
             if self.cross == "fmm":
@@ -760,9 +765,29 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
             needs_g = np.asarray(jax.device_get(aux_f[0][2])).max(0)
             from jaccpot.runtime.fused_topology import overflow_ok
 
-            if not bool(overflow_ok(bits)):
+            gal_failed = not bool(overflow_ok(bits))
+            if gal_failed:
                 gal.replan(needs_g, bits)
             parts = np.asarray(jax.device_get(aux_f[2])).all(0)
+            grown = self._grown_only(failed, parts, setup)
+            if grown is not None:
+                # only the failed target parts grew (section 17); the galaxy's
+                # mesh force is re-prepared only if its caps failed
+                st = ms.state
+                if gal_failed:
+                    ndev = int(np.asarray(st.n_live).shape[0])
+                    rows = int(st.galaxy_masses.shape[1])
+                    gal.prepare(
+                        st.galaxy_positions.reshape(ndev * rows, 3),
+                        jnp.where(
+                            jnp.arange(rows)[None, :] < st.n_live[:, None],
+                            st.galaxy_masses,
+                            0,
+                        ).reshape(ndev * rows),
+                        st.n_live,
+                    )
+                cleared = _keep_values(st.aux, st.aux)
+                return grown.with_pin(), ms._replace(state=st._replace(aux=cleared))
             if bool(parts.all()):
                 # only the galaxy's caps failed: re-prepare its mesh force at the
                 # start (the grown caps), keep every target plan (the per-device
@@ -813,6 +838,65 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
             )
         st = ms.state._replace(aux=_keep_values(ms.state.aux, aux))
         return new.with_pin(), ms._replace(state=st)
+
+    def _grown_only(self, failed: Any, parts: Any, setup: dict) -> Any:
+        """The force with only its FAILED target parts grown, or ``None`` (section 17).
+
+        ``parts`` (``ok[4]`` reduced over the devices) names the failures; each
+        grows from the failed run's needs (max over the devices) times
+        ``replan_growth`` (``FusedClustersForce``'s rule): the stars' plan and the
+        coupling's from their needs; the back-reaction from its needs and, for a
+        grouped plan, its inner set re-sized at the failed state (one plans-only
+        prepare); the star tree re-prepared over the failed state's filled slots
+        (the mesh carries no star-tree needs). ``None`` when no target part failed
+        or a failed one has nothing to grow from: the caller re-plans as before.
+        """
+        from nornax.adapters.jaccpot_hybrid import REPLAN_GROWTH, _merged_back
+
+        if bool(np.all(parts)):
+            return None
+        growth = max(
+            float(setup.get("replan_growth") or REPLAN_GROWTH),
+            float(setup.get("headroom", 1.5)),
+        )
+        needs = np.asarray(jax.device_get(failed.state.aux[3])).max(0)
+        kw: dict = {}
+        for part, row, name in ((0, 0, "stars_plan"), (3, 2, "coupling_plan")):
+            if parts[part]:
+                continue
+            plan = getattr(self, name)
+            if plan is None or int(np.max(needs[row])) <= 0:
+                return None
+            kw[name] = plan.grown(needs[row], growth)
+        plans_at_failed = None
+        if not parts[1] or not parts[2]:
+            plans_at_failed, _ = FusedMeshClustersForce._prepare(
+                failed, galaxy=None, partition=self.partition, plans_only=True, **setup
+            )
+        if not parts[1]:
+            back = self.galaxy_plan
+            if back is None:
+                return None
+            if int(np.max(needs[1])) > 0:
+                back = back.grown(needs[1], growth)
+            elif not hasattr(back, "inner"):
+                return None
+            if hasattr(back, "inner") and plans_at_failed.galaxy_plan is not None:
+                back = _merged_back(back, plans_at_failed.galaxy_plan)
+            kw["galaxy_plan"] = back
+        if not parts[2]:
+            if plans_at_failed.clusters is None:
+                return None
+            # the star provider prepared at the failed state (over its filled
+            # slots); the plans on its topology are kept (or grown above)
+            kw["clusters"] = plans_at_failed.clusters
+        new = dataclasses.replace(self, **kw)
+        object.__setattr__(
+            new,
+            "last_replan",
+            ("targeted", *[n for n, f in zip(_PARTS, parts) if not f]),
+        )
+        return new
 
     def resized(self, ms: MeshClusterState, layout: MeshLayout) -> tuple:
         """Re-planned for a grown layout (rows or slots).
@@ -884,6 +968,7 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
         back_reaction: str = "auto",
         back_options: dict | None = None,
         cross_caps: Any = None,
+        replan_growth: float | None = None,
     ) -> tuple:
         """The force at the stacked state (its rows owned) and its stacked ``aux`` seed.
 
@@ -924,6 +1009,9 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
             The galaxy's cross-domain capacities (``None``: jaccpot's sizing,
             ``"auto"``, measured at the start as its mesh runner does; a retry
             grows them).
+        replan_growth : float | None
+            ``FusedClustersForce.prepare``'s (``None``: its default): a failed
+            capacity grows to this many times its need (section 17).
 
         Returns
         -------
@@ -935,8 +1023,11 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
         ValueError
             For an unknown ``coupling``.
         """
+        from nornax.adapters.jaccpot_hybrid import REPLAN_GROWTH
+
         if coupling not in _COUPLING:
             raise ValueError(f"coupling must be one of {_COUPLING}, got {coupling!r}")
+        growth = REPLAN_GROWTH if replan_growth is None else float(replan_growth)
         setup = dict(
             galaxy_solver=galaxy_solver,
             cluster_solver=cluster_solver,
@@ -950,6 +1041,7 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
             back_reaction=back_reaction,
             back_options=back_options,
             layout=layout,
+            replan_growth=growth,
         )
         if layout.ndev == 1:
             from nornax.adapters.jaccpot_hybrid import FusedClustersForce
@@ -980,6 +1072,7 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
                 headroom=float(headroom),
                 back_reaction=back_reaction,
                 back_options=back_options,
+                replan_growth=growth,
             )
             force = cls(
                 ndev=1,
@@ -1049,10 +1142,10 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
         layout: MeshLayout,
         cross_caps: Any = None,
         plans_only: bool = False,
+        replan_growth: float | None = None,
     ) -> tuple:
         """The ``ndev > 1`` prepare: the galaxy's mesh force, then the plans per device."""
         del cross_caps
-        from jaccpot import FusedForceProvider
         from jaccpot.distributed.clusters_mesh import MortonPartition
         from jaccpot.distributed.fused import host_mesh_bounds
         from jaccpot.runtime import target_points as tp
@@ -1133,7 +1226,7 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
                         )
         clu = plan_g = plan_cc = None
         if cross == "fmm" or coupling == "fmm":
-            clu, ctopo = FusedForceProvider.prepare(
+            clu, ctopo = prepare_star_provider(
                 cluster_solver,
                 pts,
                 msf,
@@ -1199,6 +1292,7 @@ class FusedMeshClustersForce:  # pragma: no cover - jaccpot (tests/integration)
                 back_reaction=back_reaction,
                 back_options=back_options,
                 layout=layout,
+                replan_growth=replan_growth,
             ),
         )
         fb_s = None

@@ -1566,6 +1566,24 @@ def _replan(slow: Any, state: Any, failed: Any) -> tuple[Any, Any]:
     return slow.replanned(state)
 
 
+_EDGE_PROGRAMS: dict = {}
+
+
+def _edge_program(key: tuple, keep: Any, make: Callable) -> Callable:
+    """A jitted edge program shared by every slow force with the same ``key``.
+
+    A re-plan makes a new slow force; the stripping candidates do not read it
+    and the transfer reads only what :meth:`edge_view` keeps (``G``, the pair
+    kernel, the coupling, the ``admit`` rule), so they compile once per scheme
+    (section 17), not once per re-plan. ``keep`` holds what the key's ids name.
+    """
+    hit = _EDGE_PROGRAMS.get(key)
+    if hit is None:
+        hit = (keep, make())
+        _EDGE_PROGRAMS[key] = hit
+    return hit[1]
+
+
 class _Programs:
     """The jitted programs of one (scheme, slow, dt, steps) combination."""
 
@@ -1584,9 +1602,22 @@ class _Programs:
         self.candidates = (
             None
             if policy is None
-            else jax.jit(lambda s: strip_candidates(s, G_c, policy))
+            else _edge_program(
+                ("candidates", id(scheme), id(policy), float(G_c)),
+                (scheme, policy),
+                lambda: jax.jit(lambda s: strip_candidates(s, G_c, policy)),
+            )
         )
-        self.transfer = jax.jit(lambda s, t, d: transfer(s, t, d, scheme, slow))
+        view = getattr(slow, "edge_view", None)
+        if callable(view):
+            v = view()
+            self.transfer = _edge_program(
+                ("transfer", id(scheme), v),
+                scheme,
+                lambda: jax.jit(lambda s, t, d: transfer(s, t, d, scheme, v)),
+            )
+        else:
+            self.transfer = jax.jit(lambda s, t, d: transfer(s, t, d, scheme, slow))
         self.refresh = jax.jit(lambda s: scheme.refresh(s, slow))
 
 

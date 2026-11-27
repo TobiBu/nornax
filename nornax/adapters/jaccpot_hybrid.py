@@ -529,6 +529,35 @@ class FusedHybridForce:
 _COUPLING = ("fmm", "direct", "none")
 _BACK = ("auto", "walk")
 
+REPLAN_GROWTH = 2.0
+"""A capacity that failed a segment's verdict grows to this many times what the
+segment needed (``FusedClustersForce.prepare(replan_growth=)``; section 17). The
+prepare's own headroom (``headroom``, 1.5) sizes the START; a re-plan means the
+system outgrew it, and a dissolving cluster keeps outgrowing it, so a re-plan
+buys more room than the start did."""
+
+
+def _scaled_walk_needs(needs: Any, growth: float) -> Any:
+    """A provider's walk needs with the list counts scaled so jaccpot's re-plan lands at ``growth`` x need.
+
+    jaccpot's ``provider.replanned`` sizes a list to its need times
+    ``JACCPOT_FLAT_WALK_CAP_HEADROOM`` (1.5 by default); the far/near counts are
+    scaled by ``growth`` over that (never down). The flags and the tree's needs
+    (leaf count, depth, width: jaccpot's own headroom) are left as they are.
+    """
+    from jaccpot.runtime._interaction_cache import flat_walk_cap_headroom
+    from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+    out = np.array(needs, dtype=np.int64, copy=True).reshape(-1)
+    if out.size != len(NEEDS_FIELDS):  # a stub's needs (tests)
+        return np.asarray(needs)
+    factor = max(1.0, float(growth) / float(flat_walk_cap_headroom()))
+    for name in ("far_needed", "near_needed"):
+        i = NEEDS_FIELDS.index(name)
+        if out[i] > 0:
+            out[i] = int(np.ceil(out[i] * factor))
+    return out.astype(np.asarray(needs).dtype)
+
 
 def galaxy_solver(**kwargs: Any) -> Any:
     """The galaxy's ``jaccpot.FastMultipoleMethod`` for a hybrid run: ``preset="galaxy"``.
@@ -663,6 +692,158 @@ def _live_sources(xg: Any, mg: Any, n_live: Any, f_b: Any, cubic: bool) -> Any:
         bounds=live_bounds(xg, n_live, cubic=cubic),
         num_valid=jnp.asarray(n_live, jnp.int32),
     )
+
+
+def _slot_mask(ms: Any) -> Any:
+    """``[K M]`` bool: the filled star slots (the target walks skip the empty ones)."""
+    return jnp.asarray(ms) > 0
+
+
+def _filled_cut(xs: Any, ms: Any, cubic: bool) -> tuple:
+    """``(xs, ms, n, box)``: the star slots with the FILLED ones first (stable), their count and box.
+
+    The Morton box is the filled slots' own (``jaccpot.escapers.live_bounds``, the
+    escaper split's box), so where the empty slots sit changes nothing.
+    """
+    from jaccpot.escapers import live_bounds
+
+    filled = ms > 0
+    order = jnp.argsort(~filled, stable=True)  # filled first, slot order kept
+    n = jnp.sum(filled.astype(jnp.int32))
+    xs2, ms2 = xs[order], ms[order]
+    n_tree = jnp.maximum(n, 1)  # all dissolved: one massless row
+    return xs2, ms2, n_tree, live_bounds(xs2, n_tree, cubic=cubic)
+
+
+def _folded(xs: Any, ms: Any) -> tuple:
+    """The star slots with every EMPTY slot moved onto the first filled one (massless).
+
+    The bucket-leaf fallback of :func:`star_topology` (a bucket partition takes no
+    live-row cut): the box is the filled slots' own, the empty slots coincide
+    with a star.
+    """
+    filled = ms > 0
+    first = jnp.argmax(filled)
+    return jnp.where(filled[:, None], xs, xs[first][None, :]), ms
+
+
+def _star_cells(provider_or_engine: Any) -> bool:
+    eng = getattr(provider_or_engine, "engine", provider_or_engine)
+    eng = galaxy_solver_engine(eng)
+    return getattr(eng, "_tree_leaf_partition", "buckets") == "cells"
+
+
+def star_topology(provider: Any, xs: Any, ms: Any) -> Any:
+    """The star tree over the FILLED slots only (traced): HH5, section 17.
+
+    An empty slot (a stripped star's, a padded or a dissolved cluster's, a mesh
+    device's unused slot) is massless, but as a ROW of the star tree it still
+    shaped the tree's box, its leaves and its walk: a stripped star's slot stays
+    where the star left, so the box followed the cluster along its orbit and the
+    tree overflowed its static capacities (a re-plan and a recompile per
+    stripping edge, HH4b). Here the tree is built over the filled slots alone:
+    cell leaves take the escaper split's live-row cut (the filled slots first,
+    stable, ``rebuild(bounds=, num_valid=)``: the empty ones are in no leaf and
+    outside the box); bucket leaves fold the empty slots onto a filled one. With
+    no empty slot this is the plain ``rebuild(xs, ms)`` bitwise (the order and
+    the box are the same); with empty slots the field does not depend on where
+    they are, bitwise.
+
+    Parameters
+    ----------
+    provider : Any
+        The star slots' ``FusedForceProvider``.
+    xs : Any
+        ``[K M, 3]`` star slots.
+    ms : Any
+        ``[K M]`` (zero: empty).
+
+    Returns
+    -------
+    Any
+        The ``FusedTopology``.
+    """
+    if _star_cells(provider):
+        cubic = bool(getattr(provider.engine, "_tree_cubic_bounds", False))
+        xs2, ms2, n, box = _filled_cut(xs, ms, cubic)
+        return provider.rebuild(xs2, ms2, bounds=box, num_valid=n)
+    return provider.rebuild(*_folded(xs, ms))
+
+
+_CUT_FN: dict = {}
+
+
+def _eager_cut(xs: Any, ms: Any, cubic: bool) -> tuple:
+    fn = _CUT_FN.get(bool(cubic))
+    if fn is None:
+        fn = jax.jit(lambda x, m: _filled_cut(x, m, bool(cubic)))
+        _CUT_FN[bool(cubic)] = fn
+    return fn(xs, ms)
+
+
+def prepare_star_provider(
+    cluster_solver: Any, xs: Any, ms: Any, *, leaf_size: int, max_order: int
+) -> tuple:
+    """The star provider prepared over the FILLED slots only (eager; :func:`star_topology`'s tree).
+
+    With no empty slot this is the plain prepare (main's, call for call); with
+    empty slots, the eager cell build over the filled slots in their box
+    (``jaccpot``'s ``eager_live_rows``, as the traced cut), or the folded slots.
+
+    Parameters
+    ----------
+    cluster_solver : Any
+        The star solver.
+    xs : Any
+        ``[K M, 3]``.
+    ms : Any
+        ``[K M]``.
+    leaf_size : int
+        Leaf size.
+    max_order : int
+        Expansion order.
+
+    Returns
+    -------
+    tuple
+        ``(provider, topology)``; the topology holds the slots in the cut's order
+        (only target plans read it).
+    """
+    from jaccpot import FusedForceProvider
+
+    n_slots = int(jnp.shape(ms)[0])
+    n_filled = int(jnp.sum(jnp.asarray(ms) > 0))
+    kw = dict(leaf_size=int(leaf_size), max_order=int(max_order))
+    if n_filled == n_slots:
+        return FusedForceProvider.prepare(cluster_solver, xs, ms, **kw)
+    if _star_cells(cluster_solver):
+        from jaccpot.runtime.capacity_plan import eager_live_rows
+
+        cubic = bool(
+            getattr(galaxy_solver_engine(cluster_solver), "_tree_cubic_bounds", False)
+        )
+        xs2, ms2, n, box = _eager_cut(jnp.asarray(xs), jnp.asarray(ms), cubic)
+        with eager_live_rows(int(n)):
+            return FusedForceProvider.prepare(
+                cluster_solver, xs2, ms2, bounds=box, **kw
+            )
+    return FusedForceProvider.prepare(cluster_solver, *_folded(xs, ms), **kw)
+
+
+def _star_replanned(provider: Any, needs: Any, xs: Any, ms: Any) -> Any:
+    """``provider.replanned(needs, ...)`` over the filled slots (:func:`prepare_star_provider`)."""
+    n_slots = int(jnp.shape(ms)[0])
+    n_filled = int(jnp.sum(jnp.asarray(ms) > 0))
+    if n_filled == n_slots:
+        return provider.replanned(needs, xs, ms)
+    if _star_cells(provider):
+        from jaccpot.runtime.capacity_plan import eager_live_rows
+
+        cubic = bool(getattr(provider.engine, "_tree_cubic_bounds", False))
+        xs2, ms2, n, box = _eager_cut(jnp.asarray(xs), jnp.asarray(ms), cubic)
+        with eager_live_rows(int(n)):
+            return provider.replanned(needs, xs2, ms2, bounds=box)
+    return provider.replanned(needs, *_folded(xs, ms))
 
 
 def _merged_back(a: Any, b: Any) -> Any:
@@ -812,6 +993,69 @@ def _fold(bits: Any, needs: Any, bits_in: Any, needs_in: Any) -> tuple[Any, Any]
     return bits, needs
 
 
+def _admit(aux: Any, rows: Any, star_acc: Any) -> Any:
+    """:meth:`FusedClustersForce.admit` (a new row's f_b: its slow acceleration's magnitude)."""
+    aux_g, fb_s, ok, needs, aux_c = aux
+    if aux_g is None or aux_g[0] is None:
+        return aux
+    f = jnp.asarray(aux_g[0])
+    mag = jnp.linalg.norm(jnp.asarray(star_acc, f.dtype), axis=-1)
+    f = f.at[rows].set(mag, mode="drop")
+    return ((f,) + tuple(aux_g[1:]), fb_s, ok, needs, aux_c)
+
+
+def _kernel_psi(r2: Any, kernel: str, eps: float) -> Any:
+    from jaccpot.softening import masked_pair_factors, softening_params
+
+    r2 = jnp.asarray(r2)
+    _, psi, _ = masked_pair_factors(
+        r2,
+        jnp.ones(r2.shape, bool),
+        softening_params(kernel, eps, r2.dtype),
+        kernel,
+        potential=True,
+    )
+    return psi
+
+
+@dataclass(frozen=True)
+class EdgeView:
+    """What a stripping transfer reads of a :class:`FusedClustersForce` (hashable).
+
+    The transfer program (:func:`~nornax.hybrid_clusters.transfer`) is keyed on
+    it, so a re-plan (new plans, same kernel) does not recompile it.
+
+    Attributes
+    ----------
+    G : float
+        The slow pairs' gravitational constant.
+    kernel : str
+        The galaxy's softening kernel.
+    eps : float
+        Its softening.
+    coupling : str
+        The force's coupling.
+    """
+
+    G: float
+    kernel: str
+    eps: float
+    coupling: str
+
+    @property
+    def couples_clusters(self) -> bool:
+        """Whether stars of different clusters attract."""
+        return self.coupling != "none"
+
+    def pair_potential(self, r2: Any) -> Any:
+        """:meth:`FusedClustersForce.pair_potential`."""
+        return _kernel_psi(r2, self.kernel, self.eps)
+
+    def admit(self, aux: Any, rows: Any, star_acc: Any) -> Any:
+        """:meth:`FusedClustersForce.admit`."""
+        return _admit(aux, rows, star_acc)
+
+
 @dataclass(frozen=True, eq=False)
 class FusedClustersForce:
     """The galaxy's FMM + ``K`` direct-sum clusters, with a reserve for stripped stars.
@@ -926,18 +1170,8 @@ class FusedClustersForce:
 
     def pair_potential(self, r2: Any) -> Any:
         """The galaxy kernel's ``psi(r^2)`` (``-G m m psi`` is a slow pair's energy)."""
-        from jaccpot.softening import masked_pair_factors, softening_params
-
         _, kernel, eps = self._engine_kernel()
-        r2 = jnp.asarray(r2)
-        _, psi, _ = masked_pair_factors(
-            r2,
-            jnp.ones(r2.shape, bool),
-            softening_params(kernel, eps, r2.dtype),
-            kernel,
-            potential=True,
-        )
-        return psi
+        return _kernel_psi(r2, kernel, eps)
 
     # ---------------------------------------------------------------- eager
     @classmethod
@@ -962,6 +1196,7 @@ class FusedClustersForce:
         galaxy_aux: Any = None,
         back_reaction: str = "auto",
         back_options: dict | None = None,
+        replan_growth: float = REPLAN_GROWTH,
     ) -> tuple["FusedClustersForce", Any]:
         """Prepare the providers and size the target plans at the given positions.
 
@@ -1016,6 +1251,9 @@ class FusedClustersForce:
             Extra keywords of jaccpot's ``plan_back_reaction`` (``theta_mp``,
             ``mp_order``, ``r_min``, ``min_inner``, ``slice_size``,
             ``group_chunk``); ``None``: its defaults.
+        replan_growth : float
+            A capacity that failed a segment grows to this many times the
+            failed need (:meth:`replanned`; :data:`REPLAN_GROWTH`).
 
         Returns
         -------
@@ -1025,9 +1263,9 @@ class FusedClustersForce:
         Raises
         ------
         ValueError
-            For an unknown ``cross``/``coupling``/``back_reaction``, rows that
-            are not ``N_g + reserve``, or a cluster solver with a force-scale
-            criterion.
+            For an unknown ``cross``/``coupling``/``back_reaction``, a
+            ``replan_growth`` below 1, rows that are not ``N_g + reserve``, or a
+            cluster solver with a force-scale criterion.
         """
         if cross not in _CROSS:
             raise ValueError(f"cross must be one of {_CROSS}, got {cross!r}")
@@ -1037,6 +1275,8 @@ class FusedClustersForce:
             raise ValueError(
                 f"back_reaction must be one of {_BACK}, not {back_reaction!r}"
             )
+        if not float(replan_growth) >= 1.0:
+            raise ValueError(f"replan_growth must be >= 1, got {replan_growth}")
         from jaccpot import FusedForceProvider
         from jaccpot.escapers import eager_split_inputs
         from jaccpot.runtime import target_points as tp
@@ -1072,6 +1312,7 @@ class FusedClustersForce:
             headroom=float(headroom),
             back_reaction=back_reaction,
             back_options=None if back_options is None else dict(back_options),
+            replan_growth=float(replan_growth),
         )
         if not reserve:
             gal, topo = FusedForceProvider.prepare(
@@ -1148,22 +1389,38 @@ class FusedClustersForce:
                     [f_live, jnp.full((n_free,), jnp.median(f_live), f_live.dtype)]
                 )
             sources2 = _live_sources(x_plan, m_plan, rows, f_plan, cubic)
+        # with a reserve the stars' walk skips the empty slots (section 17); the
+        # plain path (no reserve: session 1's step_with_targets) walks them all
+        smask = _slot_mask(ms) if reserve else None
         plan_s = tp.plan_target_points(
-            gal, sources, pts, group_size=group_size, headroom=headroom
+            gal,
+            sources,
+            pts,
+            group_size=group_size,
+            headroom=headroom,
+            point_mask=smask,
         )
         if sources2 is not None:
             extra_s = tp.plan_target_points(
-                gal, sources2, pts, group_size=group_size, headroom=headroom
+                gal,
+                sources2,
+                pts,
+                group_size=group_size,
+                headroom=headroom,
+                point_mask=smask,
             )
             plan_s = _summed(plan_s, extra_s)
         f_b_s = None
         if gal.scale_carry:
-            f_b_s, _ = tp.bootstrap_target_force_scale(gal, sources, pts, plan=plan_s)
+            f_b_s, _ = tp.bootstrap_target_force_scale(
+                gal, sources, pts, plan=plan_s, point_mask=smask
+            )
         del sources, sources2
         clu = plan_g = plan_cc = None
         back_eps = float(gal.engine.softening)
         if cross == "fmm" or coupling == "fmm":
-            clu, ctopo = FusedForceProvider.prepare(
+            # the star tree over the filled slots only (section 17)
+            clu, ctopo = prepare_star_provider(
                 cluster_solver,
                 pts,
                 ms,
@@ -1190,13 +1447,15 @@ class FusedClustersForce:
                     headroom=float(headroom),
                     softening=back_eps,
                 )
-            if coupling == "fmm":
-                plan_cc = clu.plan_targets(
+            if coupling == "fmm" and K > 1:  # K = 1: no other cluster
+                plan_cc = tp.plan_target_points(
+                    clu,
                     ctopo,
                     pts,
                     group_size=group_size,
                     headroom=headroom,
                     softening=back_eps,
+                    point_mask=_slot_mask(ms),
                 )
             del ctopo
         gal.engine.clear_prepared_state_cache()
@@ -1316,12 +1575,17 @@ class FusedClustersForce:
     ) -> tuple["FusedClustersForce", Any]:
         """Re-plan at the state (its own reserve) with the verdict reset: the retry.
 
-        With ``failed`` (the state a failed segment ENDED in), the plans grow to
-        what it needed, as the runner's segment retry does: each target plan to
-        its own needs (``aux[3]``) times the headroom, and, if the galaxy's
-        verdict failed, the galaxy provider's caps through jaccpot's
-        ``provider.replanned(needs, ...)``. Re-planning only at the segment's
-        start would size them for the start again, and fail again.
+        With ``failed`` (the state a failed segment ENDED in), ONLY the parts that
+        failed grow, to what it needed times :attr:`replan_growth`, and nothing
+        else is re-prepared (:meth:`_grown_only`, section 17): a target plan from
+        its needs (``aux[3]``), the back-reaction also re-sized at the failed
+        state, the star tree or the galaxy's caps through jaccpot's
+        ``provider.replanned(needs, ...)``. Only when a failed part has nothing
+        to grow from (or without ``failed``: after a transfer that grew the
+        reserve) is everything re-prepared at ``state`` and grown from the needs
+        (the previous behaviour). Re-planning only at the segment's start would
+        size them for the start again, and fail again. ``last_replan`` on the new
+        force says which (``("targeted", <parts>...)`` or ``("full",)``).
 
         Parameters
         ----------
@@ -1335,9 +1599,19 @@ class FusedClustersForce:
         tuple[FusedClustersForce, Any]
             The new force and the state with a fresh verdict in its ``aux``.
         """
-        force, st = self.with_reserve(state, int(state.reserve))
+        force = None
         if failed is not None:
-            force = force._grown_from(failed.aux, st, failed=failed)
+            # grow only what failed, with headroom (section 17): no re-prepare of
+            # the parts that fitted
+            force = self._grown_only(failed.aux, state, failed)
+        if force is not None:
+            st = state
+        else:
+            force, st = self.with_reserve(state, int(state.reserve))
+            if failed is not None:
+                force = force._grown_from(failed.aux, st, failed=failed)
+            # what this re-plan did (diagnostics; not a dataclass field)
+            object.__setattr__(force, "last_replan", ("full",))
         aux_g, fb_s, ok, needs, aux_c = st.aux
 
         def cleared(a: Any) -> Any:
@@ -1357,6 +1631,87 @@ class FusedClustersForce:
                 aux_c,
             )
         )
+
+    @property
+    def replan_growth(self) -> float:
+        """What a failed capacity grows to, times its need (``setup``; :data:`REPLAN_GROWTH`)."""
+        return float((self.setup or {}).get("replan_growth", REPLAN_GROWTH))
+
+    def _grown_only(self, aux: Any, state: Any, failed: Any) -> Any:
+        """The force with ONLY the failed parts grown, or ``None`` (then a full re-plan).
+
+        Each part that failed its verdict grows from the failed segment's needs
+        times :attr:`replan_growth`; every part that fitted keeps its plan and its
+        provider (no re-prepare, its programs' inputs unchanged):
+
+        * a target plan (``ok[0]`` the stars' field, ``ok[3]`` the coupling):
+          ``TargetPlan.grown(needs, replan_growth)``;
+        * the back-reaction (``ok[1]``): grown from its needs, and its inner set
+          re-sized at the failed END state and merged in (``needs`` does not carry
+          the inner capacity);
+        * the star tree (``ok[2]``): the star provider re-planned from its own
+          tree's needs (jaccpot's ``provider.replanned``) at ``state``, its walk
+          counts scaled so the lists land at ``replan_growth`` times the need;
+        * the galaxy's caps (its verdict): the galaxy provider re-planned the same
+          way (caps-only, the live rows' box), as :meth:`_galaxy_caps_grown`.
+
+        A part that failed with nothing to grow from (no needs, a provider that
+        cannot re-plan, the galaxy without a reserve) returns ``None``: the caller
+        re-plans everything (the previous behaviour).
+        """
+        growth = max(self.replan_growth, float((self.setup or {}).get("headroom", 1.5)))
+        gal_ok, _ = self.verdict(aux)
+        parts = np.asarray(aux[2]).reshape(-1).astype(bool)
+        needs = np.asarray(aux[3]).reshape(3, 2)
+        grown: list = []
+        kw: dict = {}
+        for part, row, name in ((0, 0, "stars_plan"), (3, 2, "coupling_plan")):
+            if parts[part]:
+                continue
+            plan = getattr(self, name)
+            if plan is None or int(np.max(needs[row])) <= 0:
+                return None
+            kw[name] = plan.grown(needs[row], growth)
+            grown.append(name)
+        if not parts[1]:
+            back = self.galaxy_plan
+            if back is None:
+                return None
+            if int(np.max(needs[1])) > 0:
+                back = back.grown(needs[1], growth)
+            elif not hasattr(back, "inner"):
+                return None
+            if hasattr(back, "inner"):
+                back = _merged_back(back, self._back_plan_at(failed))
+            kw["galaxy_plan"] = back
+            grown.append("galaxy_plan")
+        out = dataclasses.replace(self, **kw) if kw else self
+        aux_g = aux[0]
+        if not gal_ok:
+            if not self.reserve or aux_g is None or aux_g[2] is None:
+                return None
+            new = out._galaxy_caps_grown(
+                _scaled_walk_needs(np.asarray(aux_g[2]), growth), state
+            )
+            if new.galaxy is out.galaxy:
+                return None
+            out = new
+            grown.append("galaxy")
+        if not parts[2]:
+            aux_c = aux[4]
+            if out.clusters is None or aux_c is None:
+                return None
+            new = out._star_caps_grown(
+                _scaled_walk_needs(np.asarray(aux_c[1]), growth), state
+            )
+            if new.clusters is out.clusters:
+                return None
+            out = new
+            grown.append("star tree")
+        if not grown:
+            return None
+        object.__setattr__(out, "last_replan", ("targeted", *grown))
+        return out
 
     def _grown_from(
         self, aux: Any, state: Any, failed: Any = None
@@ -1408,7 +1763,8 @@ class FusedClustersForce:
         xs, ms = self._star_slots(
             state.clusters.positions, state.clusters.masses, dtype
         )
-        ctopo = jax.jit(self.clusters.rebuild)(xs, ms)
+        prov = self.clusters
+        ctopo = jax.jit(lambda x, m: star_topology(prov, x, m))(xs, ms)
         return _plan_back(
             self.clusters,
             ctopo,
@@ -1432,7 +1788,7 @@ class FusedClustersForce:
             state.clusters.masses,
             jnp.asarray(state.galaxy_positions).dtype,
         )
-        out = self.clusters.replanned(needs_c, xs, ms)
+        out = _star_replanned(self.clusters, needs_c, xs, ms)
         if out is None:
             return self
         return dataclasses.replace(self, clusters=out[0])
@@ -1469,6 +1825,7 @@ class FusedClustersForce:
         aux_g: Any,
         fb_s: Any,
         potential: bool = False,
+        pts_mask: Any = None,
     ) -> tuple:
         """``(acc, aux_g, field, topology)``: the galaxy's force and its field at ``pts``."""
         if not self.reserve:
@@ -1501,6 +1858,7 @@ class FusedClustersForce:
             self.stars_plan,
             force_scale=fb_s,
             return_force_scale=bool(gal.scale_carry),
+            point_mask=pts_mask,
         )
         return acc, (f_b, bits, needs), field
 
@@ -1531,6 +1889,14 @@ class FusedClustersForce:
     ) -> tuple:
         """``(acc, pot, ok, needs)`` of the other clusters at the star slots."""
         K, M = self.shape
+        if K == 1:
+            # one cluster: there is no other one. "fmm" would evaluate the star
+            # tree at the stars and subtract the cluster's own field exactly --
+            # two O(M^2) sums that cancel to the FMM's residual (HH4a: ~60 s per
+            # slow step at M = 1e5); "direct" has no pair (section 17, item 4)
+            zero = jnp.zeros_like(xs)
+            pot = jnp.zeros(xs.shape[:1], xs.dtype) if potential else None
+            return zero, pot, jnp.asarray(True), jnp.zeros((2,), jnp.int32)
         if self.coupling == "direct":
             G, kernel, eps = self._engine_kernel()
             cid = jnp.repeat(jnp.arange(K, dtype=jnp.int32), M)
@@ -1551,6 +1917,7 @@ class FusedClustersForce:
             self.coupling_plan,
             softening=self.back_softening,
             potential=potential,
+            point_mask=_slot_mask(ms),
         )
         a_own, p_own = self._own_field(xs, ms, potential=potential)
         a = jnp.asarray(fld.acc, xs.dtype) - jnp.asarray(a_own, xs.dtype)
@@ -1626,16 +1993,16 @@ class FusedClustersForce:
             a_g = jnp.asarray(acc, dtype) + jnp.asarray(a_back, dtype)
             ctopo = None
             if self.coupling == "fmm":
-                ctopo = self.clusters.rebuild(xs, ms)
+                ctopo = star_topology(self.clusters, xs, ms)
                 ok, aux_c = self._star_tree_verdict(ctopo, ok, aux_c)
         else:
             acc, aux_g, field = self._galaxy_with_targets(
-                xg, mg, n_live, xs, aux_g, fb_s
+                xg, mg, n_live, xs, aux_g, fb_s, pts_mask=_slot_mask(ms)
             )
             ok = ok.at[0].set(ok[0] & field.ok)
             needs = needs.at[0].max(jnp.asarray(field.needs, jnp.int32))
             fb_s = field.force_scale
-            ctopo = self.clusters.rebuild(xs, ms)
+            ctopo = star_topology(self.clusters, xs, ms)
             back = self.clusters.target_field(
                 ctopo,
                 xg,
@@ -1684,6 +2051,17 @@ class FusedClustersForce:
         )
         return out[0], out[2][0]
 
+    def edge_view(self) -> "EdgeView":
+        """What a transfer reads of this force (hashable: the edge programs' key).
+
+        Returns
+        -------
+        EdgeView
+            ``G``, the galaxy kernel and softening, the coupling.
+        """
+        G, kernel, eps = self._engine_kernel()
+        return EdgeView(G=G, kernel=str(kernel), eps=eps, coupling=self.coupling)
+
     def admit(self, aux: Any, rows: Any, star_acc: Any) -> Any:
         """Seed the galaxy force scale of newly admitted rows (``dehnen_error``).
 
@@ -1704,13 +2082,7 @@ class FusedClustersForce:
         Any
             ``aux`` with the new rows' f_b set.
         """
-        aux_g, fb_s, ok, needs, aux_c = aux
-        if aux_g is None or aux_g[0] is None:
-            return aux
-        f = jnp.asarray(aux_g[0])
-        mag = jnp.linalg.norm(jnp.asarray(star_acc, f.dtype), axis=-1)
-        f = f.at[rows].set(mag, mode="drop")
-        return ((f,) + tuple(aux_g[1:]), fb_s, ok, needs, aux_c)
+        return _admit(aux, rows, star_acc)
 
     # ---------------------------------------------------------------- eager
     def verdict(self, aux: Any) -> tuple[bool, bool]:
@@ -1763,7 +2135,12 @@ class FusedClustersForce:
             xs, ms = self._star_slots(xc, mc, xg.dtype)
             if self.cross == "fmm":
                 pot_c = gal.target_field(
-                    topo, xs, self.stars_plan, force_scale=fbs, potential=True
+                    topo,
+                    xs,
+                    self.stars_plan,
+                    force_scale=fbs,
+                    potential=True,
+                    point_mask=_slot_mask(ms) if self.reserve else None,
                 ).potential
             else:
                 mg_live = jnp.where(live, mg, jnp.zeros((), mg.dtype))
@@ -1773,7 +2150,9 @@ class FusedClustersForce:
             pot_x = None
             if self.coupling != "none":
                 ctopo = (
-                    None if self.coupling == "direct" else self.clusters.rebuild(xs, ms)
+                    None
+                    if self.coupling == "direct"
+                    else star_topology(self.clusters, xs, ms)
                 )
                 _, pot_x, _, _ = self._coupling_field(xs, ms, ctopo, potential=True)
             return phi, pot_c, pot_x
